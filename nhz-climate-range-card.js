@@ -425,7 +425,7 @@ class NhzClimateRangeCard extends HTMLElement {
       );
     }
     series.push(
-      { entity, name: graph.circular ? "Zirkuläres Mittel 1991–2020" : "ERA5 P50 1991–2020", type: "line", color: "#00897B", stroke_width: 3, data_generator: normal(center), show: { legend_value: false } },
+      { entity, name: graph.circular ? "Zirkuläres Mittel 1970–2025" : "ERA5 P50 1970–2025", type: "line", color: "#00897B", stroke_width: 3, data_generator: normal(center), show: { legend_value: false } },
       { entity, name: graph.circular ? "Zirkuläres Mittel ab 1950" : "ERA5 P50 ab 1950", type: "line", color: "#7E57C2", stroke_width: 2, stroke_dash: 5, data_generator: normal(center, "hourly_all"), show: { legend_value: false } },
       { entity: graph.source_entity, name: "Ist heute", type: "line", color: "#039BE5", stroke_width: 4, extend_to: false,
         ...(graph.source_factor ? { transform: `return x * ${Number(graph.source_factor)};` } : {}),
@@ -456,7 +456,7 @@ class NhzClimateRangeCard extends HTMLElement {
       );
     }
     series.push(
-      { entity, name: `${graph.circular ? "ERA5 Richtung 1991–2020" : "ERA5 P50 1991–2020"}${suffix}`, type: "line", color: "#00897B", stroke_width: 3, data_generator: climate("median", "daily_normal"), show: { legend_value: false } },
+      { entity, name: `${graph.circular ? "ERA5 Richtung 1970–2025" : "ERA5 P50 1970–2025"}${suffix}`, type: "line", color: "#00897B", stroke_width: 3, data_generator: climate("median", "daily_normal"), show: { legend_value: false } },
       { entity, name: `${graph.circular ? "ERA5 Richtung ab 1950" : "ERA5 P50 ab 1950"}${suffix}`, type: "line", color: "#7E57C2", stroke_width: 2, stroke_dash: 5, data_generator: climate("median", "daily_all"), show: { legend_value: false } }
     );
     if (!['90d', '365d'].includes(this._range)) {
