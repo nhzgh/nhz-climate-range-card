@@ -17,14 +17,53 @@ class NhzPrecipitationChart extends HTMLElement {
   getCardSize() { return 5; }
 
   _renderMessage(message) {
-    this.shadowRoot.innerHTML = `<ha-card><div class="message">${message}</div></ha-card><style>.message{padding:24px;color:var(--secondary-text-color)}</style>`;
+    this.shadowRoot.innerHTML = `<ha-card><div class="message">${this._escapeText(message)}</div></ha-card><style>.message{padding:24px;color:var(--secondary-text-color)}</style>`;
   }
 
-  _rangeStart(now) {
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    start.setDate(start.getDate() - (this._config.range === "7d" ? 6 : 29));
-    return start;
+  _localDateKey(now, timeZone) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(now).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
+
+  _shiftDate(dateKey, days) {
+    const date = new Date(`${dateKey}T12:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
+  _timeZoneOffset(instant, timeZone) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    }).formatToParts(instant).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+    return Date.UTC(parts.year, Number(parts.month) - 1, parts.day, parts.hour, parts.minute, parts.second) - instant.getTime();
+  }
+
+  _localTime(dateKey, timeZone, hour = 0) {
+    const guess = new Date(`${dateKey}T${String(hour).padStart(2, "0")}:00:00Z`);
+    let result = new Date(guess.getTime() - this._timeZoneOffset(guess, timeZone));
+    result = new Date(guess.getTime() - this._timeZoneOffset(result, timeZone));
+    return result;
+  }
+
+  _rangeStart(now, timeZone) {
+    const days = this._config.range === "7d" ? 7 : 30;
+    return this._localTime(this._shiftDate(this._localDateKey(now, timeZone), -(days - 1)), timeZone);
+  }
+
+  _number(value) {
+    if (value == null || value === "" || typeof value === "boolean") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  _time(value) {
+    if (value == null || value === "") return null;
+    if (typeof value === "number") return value < 100000000000 ? value * 1000 : value;
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   async _statistics(entityId, start, end, period) {
@@ -44,10 +83,11 @@ class NhzPrecipitationChart extends HTMLElement {
     let total = 0;
     const result = [[startTime, 0]];
     for (const row of rows) {
-      const value = Number(row[valueField]);
-      if (!Number.isFinite(value)) continue;
+      const value = this._number(row[valueField]);
+      const time = this._time(row[timeField]);
+      if (value == null || time == null) continue;
       total += Math.max(0, value);
-      result.push([Number(row[timeField]), total]);
+      result.push([time, total]);
     }
     return result;
   }
@@ -84,6 +124,188 @@ class NhzPrecipitationChart extends HTMLElement {
     </svg>`;
   }
 
+  _monthlyData(profile, graph) {
+    const entityId = graph.monthly_comparison_entity || graph.monthly_entity;
+    const monthlyEntity = entityId && this._hass.states[entityId];
+    const attributes = monthlyEntity?.attributes || profile.attributes || {};
+    const configured = graph.monthly_attribute;
+    const candidates = [
+      configured && attributes[configured],
+      attributes.monthly_comparisons?.[this._config.range],
+      attributes.monthly_comparison,
+      attributes.monthly_precipitation,
+      attributes.precipitation_monthly,
+      attributes.monthly,
+    ];
+    const payload = candidates.find(value => value && (Array.isArray(value) || Array.isArray(value.months)));
+    if (!payload) return null;
+    const rows = Array.isArray(payload) ? payload : payload.months;
+    const pick = (object, names) => {
+      for (const name of names) {
+        const value = this._number(object?.[name]);
+        if (value != null) return value;
+      }
+      return null;
+    };
+    const normalized = rows.map((row) => {
+      const reference = row.reference || row.climatology || row.normal || {};
+      const actualData = (row.actual && typeof row.actual === "object" ? row.actual : null)
+        || row.modelled_actual || row.local_actual || {};
+      const rawActual = pick(actualData, ["sum_mm", "sum", "actual_mm", "actual", "value_mm", "value"])
+        ?? pick(row, ["actual_mm", "actual", "value_mm", "value"]);
+      const coverage = pick(actualData, ["coverage", "coverage_ratio", "coverage_percent"])
+        ?? pick(row, ["coverage", "coverage_ratio", "coverage_percent"]);
+      const complete = coverage == null || coverage >= (coverage <= 1 ? 0.999999 : 99.9999);
+      const p10 = pick(reference, ["p10_mm", "p10"])
+        ?? pick(row, ["p10_mm", "p10"]);
+      const p90 = pick(reference, ["p90_mm", "p90"])
+        ?? pick(row, ["p90_mm", "p90"]);
+      const mean = pick(reference, ["mean_mm", "mean", "p50_mm", "p50", "median_mm", "median"])
+        ?? pick(row, ["mean_mm", "mean", "p50_mm", "p50", "median_mm", "median"]);
+      const month = row.month || row.local_start || row.month_start || row.period || row.label;
+      return {
+        month: typeof month === "string" ? month : "",
+        actual: complete ? rawActual : null, p10, p90, mean,
+        partial: Boolean(row.partial ?? row.is_partial ?? row.current_partial),
+        start: row.local_start || row.start || "",
+        end: row.local_end || row.end || "",
+        coverage,
+        incomplete: !complete,
+        source: actualData.source_class || row.actual_source || row.provenance || row.source || "",
+        provisional: Boolean(actualData.provisional ?? row.provisional),
+      };
+    }).filter(row => row.month && (row.actual != null || row.mean != null || row.p10 != null || row.p90 != null));
+    return {
+      months: normalized,
+      total: Array.isArray(payload) ? null : (payload.total || payload.rolling_365 || payload.summary || payload.overall || null),
+      daily: Array.isArray(payload) ? null : (payload.daily || payload.days || null),
+      asOf: Array.isArray(payload) ? null : (payload.as_of_utc || payload.through_utc || payload.as_of),
+      timeZone: Array.isArray(payload) ? null : (payload.site_timezone || attributes.site_timezone || attributes.timezone),
+      source: Array.isArray(payload) ? "" : (payload.actual_source || payload.provenance || ""),
+    };
+  }
+
+  _format(value, digits = 0) {
+    return value == null ? "–" : `${value.toFixed(digits)} mm`;
+  }
+
+  _escapeText(value) {
+    return String(value ?? "").replace(/[&<>"']/g, character => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+    })[character]);
+  }
+
+  _monthLabel(value) {
+    const match = /^(\d{4})-(\d{2})/.exec(value);
+    if (!match) return value;
+    return new Intl.DateTimeFormat("de-DE", { month: "short", year: "2-digit" })
+      .format(new Date(Number(match[1]), Number(match[2]) - 1, 1));
+  }
+
+  _coverageLabel(value) {
+    if (value == null) return "";
+    const percent = value <= 1 ? value * 100 : value;
+    return `Abdeckung ${percent.toFixed(0)} %`;
+  }
+
+  _monthlyRows(data) {
+    // API/HA has already selected the exact local-day interval. Keeping all its
+    // rows preserves the required 4 (90d) or 13 (365d) partial-month layout.
+    return [...data.months].sort((left, right) => String(left.start || left.month).localeCompare(String(right.start || right.month)));
+  }
+
+  _monthlySummary(data) {
+    const total = data.total;
+    if (!total) return "";
+    const actualData = (total.actual && typeof total.actual === "object" ? total.actual : null)
+      || total.modelled_actual || total.local_actual || total;
+    const rawActual = this._number(actualData.sum_mm ?? actualData.sum ?? actualData.actual_mm ?? actualData.actual ?? actualData.value_mm ?? actualData.value);
+    const coverage = this._number(actualData.coverage_ratio ?? actualData.coverage);
+    const complete = coverage == null || coverage >= (coverage <= 1 ? 0.999999 : 99.9999);
+    const actual = complete ? rawActual : null;
+    const reference = total.reference || total.climatology || total.normal || {};
+    const mean = this._number(reference.mean_mm ?? reference.mean ?? reference.p50_mm ?? reference.p50 ?? total.mean_mm ?? total.mean);
+    const delta = actual != null && mean != null ? actual - mean : null;
+    if (actual == null && mean == null) return "";
+    const label = this._config.range === "365d" ? "Rollierende 365 Tage" : "Gesamt im gewählten Zeitraum";
+    return `<div class="rolling"><span>${label}</span><strong>${this._format(actual)}</strong><small>Ø ${this._format(mean)}${delta == null ? "" : ` · Δ ${delta >= 0 ? "+" : "−"}${this._format(Math.abs(delta))}`}</small></div>`;
+  }
+
+  _monthlyView(graph, profile, now) {
+    const data = this._monthlyData(profile, graph);
+    if (!data) {
+      this._renderMessage("Monatlicher Niederschlagsvergleich ist noch nicht verfügbar.");
+      return;
+    }
+    const rows = this._monthlyRows(data);
+    if (!rows.length) {
+      this._renderMessage("Für den gewählten Zeitraum liegen noch keine Monatswerte vor.");
+      return;
+    }
+    const source = data.source || rows.find(row => row.source)?.source;
+    const scaleMax = Math.max(1, ...rows.flatMap(row => [row.p10, row.p90, row.mean, row.actual].filter(value => value != null))) * 1.08;
+    const body = rows.map((row) => {
+      const delta = row.actual != null && row.mean != null ? row.actual - row.mean : null;
+      const position = value => value == null ? null : Math.min(100, Math.max(0, value / scaleMax * 100));
+      const p10 = position(row.p10), p90 = position(row.p90), mean = position(row.mean), actual = position(row.actual);
+      const band = p10 != null && p90 != null
+        ? `<span class="band" style="left:${Math.min(p10,p90)}%;width:${Math.abs(p90-p10)}%"></span>` : "";
+      const meanMark = mean != null ? `<span class="mean" style="left:${mean}%"></span>` : "";
+      const offBand = row.actual != null && row.p10 != null && row.p90 != null && (row.actual < row.p10 || row.actual > row.p90);
+      const actualMark = actual != null ? `<span class="actual${offBand ? " off-band" : ""}" style="left:${actual}%"></span>` : "";
+      const flags = [row.partial ? `${row.start || row.month} bis ${row.end || "laufend"}` : "", row.incomplete ? "IST-Lücke" : "", row.provisional ? "vorläufig" : "", this._coverageLabel(row.coverage), row.source].filter(Boolean).join(" · ");
+      return `<div class="month-row">
+        <div class="month-name">${this._escapeText(this._monthLabel(row.month))}<small>${this._escapeText(flags)}</small></div>
+        <div class="track" aria-label="P10 bis P90, Mittelwert und Istwert">${band}${meanMark}${actualMark}</div>
+        <div class="month-values"><strong>${this._format(row.actual)}</strong><span>P10–P90 ${this._format(row.p10)}–${this._format(row.p90)} · Ø ${this._format(row.mean)}${delta == null ? "" : ` · Δ ${delta >= 0 ? "+" : "−"}${this._format(Math.abs(delta))}`}</span></div>
+      </div>`;
+    }).join("");
+    this.shadowRoot.innerHTML = `<ha-card><div class="content monthly">
+      <h2>${this._escapeText(graph.title)} – ${this._escapeText(graph.explanation)}</h2>
+      ${this._monthlySummary(data)}
+      <div class="monthly-legend"><span><i class="band-key"></i>P10–P90</span><span><i class="mean-key"></i>Mittelwert</span><span><i class="actual-key"></i>IST</span></div>
+      <div class="scale"><span>0 mm</span><span>Gemeinsame Skala bis ${this._format(scaleMax)}</span></div>
+      <div class="month-list">${body}</div>
+      ${source ? `<div class="provenance">IST-Quelle: ${this._escapeText(source)}</div>` : ""}
+    </div></ha-card><style>${this._styles()}</style>`;
+  }
+
+  _comparisonDailyRows(data, timeZone) {
+    if (!Array.isArray(data?.daily)) return null;
+    const value = (point, names) => {
+      for (const name of names) {
+        const parsed = this._number(point?.[name]);
+        if (parsed != null) return parsed;
+      }
+      return null;
+    };
+    const rows = data.daily.map((point) => {
+      const actual = point.actual || point.modelled_actual || {};
+      const reference = point.reference || point.climatology || point.normal || {};
+      const key = point.valid_on || point.local_date || point.date;
+      const time = this._time(point.time || point.start || point.local_start || point.range_start_utc)
+        ?? (typeof key === "string" ? this._localTime(key.slice(0, 10), timeZone, 12).getTime() : null);
+      return {
+        time,
+        actual: value(actual, ["sum_mm", "sum", "value_mm", "value"]),
+        expected: value(reference, ["mean_mm", "mean", "p50_mm", "p50"]),
+      };
+    }).filter(row => row.time != null && (row.actual != null || row.expected != null));
+    return rows.length ? rows : null;
+  }
+
+  _styles() {
+    return `.content{padding:18px 20px 16px;color:var(--primary-text-color)}h2{font-size:20px;margin:0 0 16px;color:var(--secondary-text-color)}
+      .difference{font-size:30px;font-weight:650;line-height:1.15}.subtitle{font-size:16px;font-weight:600;color:var(--secondary-text-color);margin:6px 0 16px}
+      .totals{display:flex;justify-content:space-between;gap:18px;margin:4px 4% 2px}.totals div{display:flex;flex-direction:column}.totals div:last-child{text-align:right}.totals strong{font-size:30px}.totals span{color:var(--secondary-text-color);font-size:13px}
+      svg{width:100%;display:block;overflow:visible}.grid{stroke:var(--divider-color);stroke-width:1}.axis,.date,.month{fill:var(--secondary-text-color);font-size:12px;font-weight:600}
+      .actual{fill:none;stroke:#25C7F4;stroke-width:6;stroke-linejoin:round;stroke-linecap:round}.expected{fill:none;stroke:#8D93A6;stroke-width:5;stroke-dasharray:12 10;stroke-linecap:round}
+      .actual-dot{fill:#25C7F4;stroke:var(--card-background-color);stroke-width:3}.expected-dot{fill:#8D93A6;stroke:var(--card-background-color);stroke-width:3}
+      .legend{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;color:var(--secondary-text-color);font-size:14px}.legend span,.monthly-legend span{display:flex;align-items:center;gap:8px}.legend i,.monthly-legend i{width:12px;height:12px;border-radius:50%}.actual-key{background:#25C7F4}.expected-key{background:#8D93A6}
+      .monthly h2{margin-bottom:10px}.monthly-legend{display:flex;gap:18px;flex-wrap:wrap;color:var(--secondary-text-color);font-size:13px;margin:0 0 7px}.band-key{background:#80CBC4;border-radius:3px!important;width:18px!important}.mean-key{background:#fff;border:1px solid #52606D}.month-list{display:grid;gap:12px}.month-row{display:grid;grid-template-columns:82px minmax(80px,1fr) 245px;gap:12px;align-items:center}.month-name{font-weight:650;text-transform:capitalize}.month-name small,.month-values span,.provenance,.rolling small{display:block;color:var(--secondary-text-color);font-size:12px;font-weight:400;margin-top:2px}.scale{display:grid;grid-template-columns:82px minmax(80px,1fr) 245px;gap:12px;color:var(--secondary-text-color);font-size:11px;margin-bottom:4px}.scale span:nth-child(2){text-align:right}.track{height:12px;position:relative;background:color-mix(in srgb,var(--divider-color) 55%,transparent);border-radius:8px}.track .band{position:absolute;top:1px;height:10px;border-radius:7px;background:#80CBC4}.track .mean{position:absolute;top:-3px;width:3px;height:18px;background:#fff;box-shadow:0 0 0 1px #52606D;border-radius:2px;transform:translateX(-50%)}.track .actual{position:absolute;top:-3px;width:18px;height:18px;border-radius:50%;background:#25C7F4;border:3px solid var(--card-background-color);transform:translateX(-50%)}.track .actual.off-band{background:#FFB300;box-shadow:0 0 0 2px #7A4A00}.month-values{text-align:right}.month-values strong{display:block;font-size:16px}.rolling{display:grid;grid-template-columns:1fr auto;gap:0 12px;align-items:baseline;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;margin-bottom:12px}.rolling strong{font-size:20px}.rolling small{grid-column:1 / -1}.provenance{margin-top:14px}
+      @media(max-width:600px){.difference{font-size:23px}.totals strong{font-size:25px}.content{padding:16px 12px}.axis{font-size:11px}.month-row{grid-template-columns:68px 1fr}.month-values{grid-column:2;text-align:left}.month-values span{white-space:normal}.monthly-legend{gap:10px}.scale{grid-template-columns:68px 1fr}.scale span:nth-child(2){grid-column:2;text-align:right}}`;
+  }
+
   async _load() {
     if (!this._hass || !this._config) return;
     const generation = (this._generation || 0) + 1;
@@ -95,19 +317,48 @@ class NhzPrecipitationChart extends HTMLElement {
       return;
     }
     const now = new Date();
-    const start = this._rangeStart(now);
+    if (["90d", "365d"].includes(this._config.range)) {
+      this._monthlyView(graph, profile, now);
+      return;
+    }
+    const preliminaryComparison = this._monthlyData(profile, graph);
+    const timeZone = preliminaryComparison?.timeZone || profile.attributes.site_timezone || profile.attributes.timezone || graph.site_timezone || "UTC";
+    const start = this._rangeStart(now, timeZone);
     try {
-      const statistics = await this._statistics(graph.aggregate_source_entity, start, now, "day");
+      const comparison = preliminaryComparison;
+      const comparisonRows = this._comparisonDailyRows(comparison, timeZone);
+      if (!graph.aggregate_source_entity && !comparisonRows) {
+        this._renderMessage("Kumulierte Niederschlagsdaten sind für diesen Zeitraum noch nicht verfügbar.");
+        return;
+      }
+      const statistics = graph.aggregate_source_entity && !comparisonRows
+        ? await this._statistics(graph.aggregate_source_entity, start, now, "day") : [];
       if (this._generation !== generation) return;
-      const actualRows = statistics.map(point => ({ time: point.start, value: point.change }));
+      const actualRows = comparisonRows
+        ? comparisonRows.map(point => ({ time: point.time, value: point.actual }))
+        : statistics.map(point => ({ time: point.start, value: point.change }));
       const actual = this._cumulative(actualRows, "time", "value", start.getTime());
-      const climateRows = (profile.attributes.daily_normal || [])
-        .map(point => ({ time: new Date(`${point.valid_on}T12:00:00`).getTime(), value: point.mean }))
-        .filter(point => point.time >= start.getTime() && point.time <= now.getTime());
+      const startKey = this._localDateKey(start, timeZone);
+      const endKey = this._localDateKey(now, timeZone);
+      const climateRows = comparisonRows
+        ? comparisonRows.map(point => ({ time: point.time, value: point.expected }))
+        : (profile.attributes.daily_normal || [])
+        .filter(point => point.valid_on >= startKey && point.valid_on <= endKey)
+        .map(point => ({ time: this._localTime(point.valid_on, timeZone, 12).getTime(), value: point.mean }));
       const expected = this._cumulative(climateRows, "time", "value", start.getTime());
-      const actualTotal = actual.at(-1)?.[1] || 0, expectedTotal = expected.at(-1)?.[1] || 0;
+      const total = comparison?.total;
+      const totalActual = total?.actual || total?.modelled_actual;
+      const coverage = this._number(totalActual?.coverage_ratio);
+      if (comparisonRows && coverage != null && coverage < 0.999999) {
+        this._renderMessage(`Der Ist-Verlauf ist nur zu ${(coverage * 100).toFixed(0)} % abgedeckt; keine vollständige Summe verfügbar.`);
+        return;
+      }
+      const totalReference = total?.reference || total?.climatology || total?.normal || {};
+      const serverExpected = this._number(totalReference.mean_mm ?? totalReference.mean ?? totalReference.p50_mm ?? totalReference.p50);
+      const actualTotal = actual.at(-1)?.[1] || 0, expectedTotal = serverExpected ?? expected.at(-1)?.[1] ?? 0;
       actual.push([now.getTime(), actualTotal]);
-      expected.push([now.getTime(), expectedTotal]);
+      if (serverExpected != null) expected.push([now.getTime(), expectedTotal]);
+      else expected.push([now.getTime(), expectedTotal]);
       this._render(graph, actualTotal, expectedTotal, this._lineChart(actual, expected, start, now, actualTotal, expectedTotal));
     } catch (error) {
       this._renderMessage(`Niederschlagsstatistik konnte nicht geladen werden: ${error.message}`);
@@ -119,23 +370,14 @@ class NhzPrecipitationChart extends HTMLElement {
     const direction = difference >= 0 ? "über" : "unter";
     this.shadowRoot.innerHTML = `<ha-card>
       <div class="content">
-        <h2>${graph.title} – ${graph.explanation}</h2>
+        <h2>${this._escapeText(graph.title)} – ${this._escapeText(graph.explanation)}</h2>
         <div class="difference">${difference >= 0 ? "+" : "−"}${Math.abs(difference).toFixed(0)} mm ${direction} dem Durchschnitt</div>
         <div class="subtitle">${this._config.range === "7d" ? "7" : "30"}-Tage-Durchschnitt: ${expected.toFixed(0)} mm</div>
         <div class="totals"><div><strong>${expected.toFixed(0)} mm</strong><span>Durchschnitt</span></div><div><strong>${actual.toFixed(0)} mm</strong><span>Letzte ${this._config.range === "7d" ? "7" : "30"} Tage</span></div></div>
         ${chart}
         <div class="legend"><span><i class="actual-key"></i>Letzte ${this._config.range === "7d" ? "7" : "30"} Tage</span><span><i class="expected-key"></i>Durchschnitt</span></div>
       </div>
-    </ha-card><style>
-      .content{padding:18px 20px 16px;color:var(--primary-text-color)}h2{font-size:20px;margin:0 0 16px;color:var(--secondary-text-color)}
-      .difference{font-size:30px;font-weight:650;line-height:1.15}.subtitle{font-size:16px;font-weight:600;color:var(--secondary-text-color);margin:6px 0 16px}
-      .totals{display:flex;justify-content:space-between;gap:18px;margin:4px 4% 2px}.totals div{display:flex;flex-direction:column}.totals div:last-child{text-align:right}.totals strong{font-size:30px}.totals span{color:var(--secondary-text-color);font-size:13px}
-      svg{width:100%;display:block;overflow:visible}.grid{stroke:var(--divider-color);stroke-width:1}.axis,.date,.month{fill:var(--secondary-text-color);font-size:12px;font-weight:600}
-      .actual{fill:none;stroke:#25C7F4;stroke-width:6;stroke-linejoin:round;stroke-linecap:round}.expected{fill:none;stroke:#8D93A6;stroke-width:5;stroke-dasharray:12 10;stroke-linecap:round}
-      .actual-dot{fill:#25C7F4;stroke:var(--card-background-color);stroke-width:3}.expected-dot{fill:#8D93A6;stroke:var(--card-background-color);stroke-width:3}
-      .legend{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;color:var(--secondary-text-color);font-size:14px}.legend span{display:flex;align-items:center;gap:8px}.legend i{width:12px;height:12px;border-radius:50%}.actual-key{background:#25C7F4}.expected-key{background:#8D93A6}
-      @media(max-width:600px){.difference{font-size:23px}.totals strong{font-size:25px}.content{padding:16px 12px}.axis{font-size:11px}}
-    </style>`;
+    </ha-card><style>${this._styles()}</style>`;
   }
 }
 
@@ -237,7 +479,17 @@ class NhzClimateRangeCard extends HTMLElement {
   }
 
   _chart(graph) {
-    if (graph.precipitation_view && ["7d", "30d"].includes(this._range)) {
+    const monthlyComparison = graph.monthly_comparison_entity || graph.monthly_entity;
+    if (monthlyComparison && this._range === "today") {
+      return {
+        type: "markdown",
+        content: `**${graph.title}:** Der Klimavergleich beginnt bei 7 Tagen. Der heutige Verlauf gehört zur operativen Wettervorhersage.`,
+      };
+    }
+    if ((graph.precipitation_view || monthlyComparison) && ["90d", "365d"].includes(this._range)) {
+      return { type: "custom:nhz-precipitation-chart", graph, range: this._range };
+    }
+    if ((graph.precipitation_view || monthlyComparison) && ["7d", "30d"].includes(this._range)) {
       return { type: "custom:nhz-precipitation-chart", graph, range: this._range };
     }
     const today = this._range === "today";
