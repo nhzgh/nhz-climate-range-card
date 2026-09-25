@@ -49,8 +49,12 @@ class NhzPrecipitationChart extends HTMLElement {
   }
 
   _rangeStart(now, timeZone) {
-    const days = this._config.range === "7d" ? 7 : 30;
+    const days = { "7d": 7, "30d": 30, "90d": 90, "365d": 365 }[this._config.range] || 30;
     return this._localTime(this._shiftDate(this._localDateKey(now, timeZone), -(days - 1)), timeZone);
+  }
+
+  _rangeLabel() {
+    return { "7d": "7 Tage", "30d": "30 Tage", "90d": "90 Tage", "365d": "365 Tage" }[this._config.range] || "Zeitraum";
   }
 
   _number(value) {
@@ -103,23 +107,31 @@ class NhzPrecipitationChart extends HTMLElement {
     return path;
   }
 
-  _lineChart(actual, expected, start, end, actualTotal, expectedTotal) {
+  _bandPath(lower, upper, x, y) {
+    if (!lower.length || !upper.length) return "";
+    const top = upper.map(([time, value]) => `${x(time)} ${y(value)}`).join(" L ");
+    const bottom = [...lower].reverse().map(([time, value]) => `${x(time)} ${y(value)}`).join(" L ");
+    return `M ${top} L ${bottom} Z`;
+  }
+
+  _lineChart(actual, expected, start, end, actualTotal, expectedTotal, p10 = [], p90 = []) {
     const width = 760, height = 300, left = 48, right = 18, top = 18, bottom = 38;
     const innerWidth = width - left - right, innerHeight = height - top - bottom;
-    const maximum = Math.max(1, actualTotal, expectedTotal) * 1.12;
+    const maximum = Math.max(1, actualTotal, expectedTotal, ...p10.map(point => point[1]), ...p90.map(point => point[1])) * 1.12;
     const x = value => left + ((value - start.getTime()) / Math.max(1, end.getTime() - start.getTime())) * innerWidth;
     const y = value => top + innerHeight - (value / maximum) * innerHeight;
     const grid = [0, .25, .5, .75, 1].map(fraction => {
       const value = maximum * fraction;
-      return `<line x1="${left}" y1="${y(value)}" x2="${width-right}" y2="${y(value)}" class="grid"/><text x="${width-right-3}" y="${y(value)-5}" text-anchor="end" class="axis">${Math.round(value)} mm</text>`;
+      return `<line x1="${left}" y1="${y(value)}" x2="${width-right}" y2="${y(value)}" class="grid"/><text x="${width-right-3}" y="${y(value)-5}" text-anchor="end" class="axis">${Math.round(value)} ${this._escapeText(this._activeUnit || "mm")}</text>`;
     }).join("");
     return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Kumulativer Niederschlag">
       ${grid}
+      ${p10.length && p90.length ? `<path d="${this._bandPath(p10, p90, x, y)}" class="expected-band"/>` : ""}
       <path d="${this._path(expected, x, y)}" class="expected"/>
       <path d="${this._path(actual, x, y, true)}" class="actual"/>
       <circle cx="${x(end.getTime())}" cy="${y(expectedTotal)}" r="6" class="expected-dot"/>
       <circle cx="${x(end.getTime())}" cy="${y(actualTotal)}" r="6" class="actual-dot"/>
-      <text x="${left}" y="${height-10}" class="date">${this._config.range === "7d" ? "Vor 7 Tagen" : "Vor 30 Tagen"}</text>
+      <text x="${left}" y="${height-10}" class="date">Vor ${this._rangeLabel()}</text>
       <text x="${width-right}" y="${height-10}" text-anchor="end" class="date">Heute</text>
     </svg>`;
   }
@@ -179,14 +191,17 @@ class NhzPrecipitationChart extends HTMLElement {
       months: normalized,
       total: Array.isArray(payload) ? null : (payload.total || payload.rolling_365 || payload.summary || payload.overall || null),
       daily: Array.isArray(payload) ? null : (payload.daily || payload.days || null),
+      cumulativeDaily: Array.isArray(payload) ? null : (payload.cumulative_daily || payload.cumulative?.daily || null),
       asOf: Array.isArray(payload) ? null : (payload.as_of_utc || payload.through_utc || payload.as_of),
       timeZone: Array.isArray(payload) ? null : (payload.site_timezone || attributes.site_timezone || attributes.timezone),
       source: Array.isArray(payload) ? "" : (payload.actual_source || payload.provenance || ""),
+      unit: Array.isArray(payload) ? (monthlyEntity?.attributes?.unit_of_measurement || "mm")
+        : (payload.unit || monthlyEntity?.attributes?.unit_of_measurement || "mm"),
     };
   }
 
   _format(value, digits = 0) {
-    return value == null ? "–" : `${value.toFixed(digits)} mm`;
+    return value == null ? "–" : `${value.toFixed(digits)} ${this._activeUnit || "mm"}`;
   }
 
   _escapeText(value) {
@@ -237,6 +252,7 @@ class NhzPrecipitationChart extends HTMLElement {
       this._renderMessage("Monatlicher Niederschlagsvergleich ist noch nicht verfügbar.");
       return;
     }
+    this._activeUnit = data.unit || "mm";
     const rows = this._monthlyRows(data);
     if (!rows.length) {
       this._renderMessage("Für den gewählten Zeitraum liegen noch keine Monatswerte vor.");
@@ -253,18 +269,26 @@ class NhzPrecipitationChart extends HTMLElement {
       const meanMark = mean != null ? `<span class="mean" style="left:${mean}%"></span>` : "";
       const offBand = row.actual != null && row.p10 != null && row.p90 != null && (row.actual < row.p10 || row.actual > row.p90);
       const actualMark = actual != null ? `<span class="actual${offBand ? " off-band" : ""}" style="left:${actual}%"></span>` : "";
-      const flags = [row.partial ? `${row.start || row.month} bis ${row.end || "laufend"}` : "", row.incomplete ? "IST-Lücke" : "", row.provisional ? "vorläufig" : "", this._coverageLabel(row.coverage), row.source].filter(Boolean).join(" · ");
+      const flags = [row.partial ? `${row.start || row.month} bis ${row.end || "laufend"}` : "", row.incomplete ? "IST-Lücke" : "", row.provisional ? "vorläufig" : ""].filter(Boolean).join(" · ");
+      const compact = `IST ${this._format(row.actual)} / Ø ${this._format(row.mean)}${delta == null ? "" : ` / Δ ${delta >= 0 ? "+" : "−"}${this._format(Math.abs(delta))}`}`;
+      const mouseover = [
+        `P10 ${this._format(row.p10)}`,
+        `P90 ${this._format(row.p90)}`,
+        `Mittelwert ${this._format(row.mean)}`,
+        `IST ${this._format(row.actual)}`,
+        this._coverageLabel(row.coverage),
+        row.source ? `Quelle: ${row.source}` : "",
+      ].filter(Boolean).join(" · ");
       return `<div class="month-row">
-        <div class="month-name">${this._escapeText(this._monthLabel(row.month))}<small>${this._escapeText(flags)}</small></div>
-        <div class="track" aria-label="P10 bis P90, Mittelwert und Istwert">${band}${meanMark}${actualMark}</div>
-        <div class="month-values"><strong>${this._format(row.actual)}</strong><span>P10–P90 ${this._format(row.p10)}–${this._format(row.p90)} · Ø ${this._format(row.mean)}${delta == null ? "" : ` · Δ ${delta >= 0 ? "+" : "−"}${this._format(Math.abs(delta))}`}</span></div>
+        <div class="month-header"><span class="month-name">${this._escapeText(this._monthLabel(row.month))} <small>(${this._escapeText(compact)})</small></span>${flags ? `<small class="month-flags">${this._escapeText(flags)}</small>` : ""}</div>
+        <div class="track" title="${this._escapeText(mouseover)}" aria-label="${this._escapeText(mouseover)}">${band}${meanMark}${actualMark}</div>
       </div>`;
     }).join("");
     this.shadowRoot.innerHTML = `<ha-card><div class="content monthly">
       <h2>${this._escapeText(graph.title)} – ${this._escapeText(graph.explanation)}</h2>
       ${this._monthlySummary(data)}
       <div class="monthly-legend"><span><i class="band-key"></i>P10–P90</span><span><i class="mean-key"></i>Mittelwert</span><span><i class="actual-key"></i>IST</span></div>
-      <div class="scale"><span>0 mm</span><span>Gemeinsame Skala bis ${this._format(scaleMax)}</span></div>
+      <div class="scale"><span>0 ${this._escapeText(this._activeUnit || "mm")}</span><span>Gemeinsame Skala bis ${this._format(scaleMax)}</span></div>
       <div class="month-list">${body}</div>
       ${source ? `<div class="provenance">IST-Quelle: ${this._escapeText(source)}</div>` : ""}
     </div></ha-card><style>${this._styles()}</style>`;
@@ -294,16 +318,52 @@ class NhzPrecipitationChart extends HTMLElement {
     return rows.length ? rows : null;
   }
 
+  _comparisonCumulativeRows(data, timeZone) {
+    // HA publishes 7/30/90-day cumulative rows under `daily` with compact
+    // keys so a 90-day P10/P50/P90 band remains below the state-attribute
+    // size limit.  The verbose API contract remains supported for direct
+    // previews and older entities.
+    const payload = data?.cumulativeDaily || data?.daily;
+    const points = Array.isArray(payload) ? payload : (payload?.days || payload?.points);
+    if (!Array.isArray(points)) return null;
+    const value = (point, names) => {
+      for (const name of names) {
+        const parsed = this._number(point?.[name]);
+        if (parsed != null) return parsed;
+      }
+      return null;
+    };
+    const rows = points.map((point) => {
+      const actual = point.actual || point.modelled_actual || {};
+      const reference = point.reference || point.climatology || point.normal || {};
+      const key = point.d || point.valid_on || point.local_date || point.date;
+      const time = this._time(point.time || point.start || point.local_start || point.range_start_utc)
+        ?? (typeof key === "string" ? this._localTime(key.slice(0, 10), timeZone, 12).getTime() : null);
+      return {
+        time,
+        actual: value(actual, ["cumulative_mm", "cumulative", "sum_mm", "sum", "value_mm", "value"])
+          ?? value(point, ["a", "actual_cumulative_mm", "actual_cumulative", "actual_mm", "actual"]),
+        p10: value(reference, ["cumulative_p10_mm", "p10_mm", "p10"])
+          ?? value(point, ["l", "p10_cumulative_mm", "p10_mm", "p10"]),
+        mean: value(reference, ["cumulative_mean_mm", "mean_mm", "mean", "p50_mm", "p50"])
+          ?? value(point, ["m", "q", "mean_cumulative_mm", "mean_mm", "mean", "p50_mm", "p50"]),
+        p90: value(reference, ["cumulative_p90_mm", "p90_mm", "p90"])
+          ?? value(point, ["h", "p90_cumulative_mm", "p90_mm", "p90"]),
+      };
+    }).filter(row => row.time != null && (row.actual != null || row.mean != null || row.p10 != null || row.p90 != null));
+    return rows.length ? rows : null;
+  }
+
   _styles() {
     return `.content{padding:18px 20px 16px;color:var(--primary-text-color)}h2{font-size:20px;margin:0 0 16px;color:var(--secondary-text-color)}
       .difference{font-size:30px;font-weight:650;line-height:1.15}.subtitle{font-size:16px;font-weight:600;color:var(--secondary-text-color);margin:6px 0 16px}
       .totals{display:flex;justify-content:space-between;gap:18px;margin:4px 4% 2px}.totals div{display:flex;flex-direction:column}.totals div:last-child{text-align:right}.totals strong{font-size:30px}.totals span{color:var(--secondary-text-color);font-size:13px}
       svg{width:100%;display:block;overflow:visible}.grid{stroke:var(--divider-color);stroke-width:1}.axis,.date,.month{fill:var(--secondary-text-color);font-size:12px;font-weight:600}
-      .actual{fill:none;stroke:#25C7F4;stroke-width:6;stroke-linejoin:round;stroke-linecap:round}.expected{fill:none;stroke:#8D93A6;stroke-width:5;stroke-dasharray:12 10;stroke-linecap:round}
+      .actual{fill:none;stroke:#25C7F4;stroke-width:6;stroke-linejoin:round;stroke-linecap:round}.expected{fill:none;stroke:#8D93A6;stroke-width:5;stroke-dasharray:12 10;stroke-linecap:round}.expected-band{fill:rgba(128,203,196,.28);stroke:none}
       .actual-dot{fill:#25C7F4;stroke:var(--card-background-color);stroke-width:3}.expected-dot{fill:#8D93A6;stroke:var(--card-background-color);stroke-width:3}
       .legend{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;color:var(--secondary-text-color);font-size:14px}.legend span,.monthly-legend span{display:flex;align-items:center;gap:8px}.legend i,.monthly-legend i{width:12px;height:12px;border-radius:50%}.actual-key{background:#25C7F4}.expected-key{background:#8D93A6}
-      .monthly h2{margin-bottom:10px}.monthly-legend{display:flex;gap:18px;flex-wrap:wrap;color:var(--secondary-text-color);font-size:13px;margin:0 0 7px}.band-key{background:#80CBC4;border-radius:3px!important;width:18px!important}.mean-key{background:#fff;border:1px solid #52606D}.month-list{display:grid;gap:12px}.month-row{display:grid;grid-template-columns:82px minmax(80px,1fr) 245px;gap:12px;align-items:center}.month-name{font-weight:650;text-transform:capitalize}.month-name small,.month-values span,.provenance,.rolling small{display:block;color:var(--secondary-text-color);font-size:12px;font-weight:400;margin-top:2px}.scale{display:grid;grid-template-columns:82px minmax(80px,1fr) 245px;gap:12px;color:var(--secondary-text-color);font-size:11px;margin-bottom:4px}.scale span:nth-child(2){text-align:right}.track{height:12px;position:relative;background:color-mix(in srgb,var(--divider-color) 55%,transparent);border-radius:8px}.track .band{position:absolute;top:1px;height:10px;border-radius:7px;background:#80CBC4}.track .mean{position:absolute;top:-3px;width:3px;height:18px;background:#fff;box-shadow:0 0 0 1px #52606D;border-radius:2px;transform:translateX(-50%)}.track .actual{position:absolute;top:-3px;width:18px;height:18px;border-radius:50%;background:#25C7F4;border:3px solid var(--card-background-color);transform:translateX(-50%)}.track .actual.off-band{background:#FFB300;box-shadow:0 0 0 2px #7A4A00}.month-values{text-align:right}.month-values strong{display:block;font-size:16px}.rolling{display:grid;grid-template-columns:1fr auto;gap:0 12px;align-items:baseline;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;margin-bottom:12px}.rolling strong{font-size:20px}.rolling small{grid-column:1 / -1}.provenance{margin-top:14px}
-      @media(max-width:600px){.difference{font-size:23px}.totals strong{font-size:25px}.content{padding:16px 12px}.axis{font-size:11px}.month-row{grid-template-columns:68px 1fr}.month-values{grid-column:2;text-align:left}.month-values span{white-space:normal}.monthly-legend{gap:10px}.scale{grid-template-columns:68px 1fr}.scale span:nth-child(2){grid-column:2;text-align:right}}`;
+      .monthly h2{margin-bottom:10px}.monthly-legend{display:flex;gap:18px;flex-wrap:wrap;color:var(--secondary-text-color);font-size:13px;margin:0 0 7px}.band-key{background:#80CBC4;border-radius:3px!important;width:18px!important}.mean-key{background:#fff;border:1px solid #52606D}.month-list{display:grid;gap:13px}.month-row{display:grid;gap:5px}.month-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0}.month-name{font-weight:650;text-transform:capitalize;min-width:0}.month-name small,.month-flags,.provenance,.rolling small{color:var(--secondary-text-color);font-size:12px;font-weight:400}.month-flags{text-align:right}.scale{display:flex;justify-content:space-between;gap:12px;color:var(--secondary-text-color);font-size:11px;margin-bottom:4px}.track{height:14px;position:relative;background:rgba(82,126,151,.20);border:1px solid rgba(128,203,196,.25);border-radius:8px}.track .band{position:absolute;top:1px;height:10px;border-radius:7px;background:linear-gradient(90deg,#548a94,#80CBC4)}.track .mean{position:absolute;top:-3px;width:3px;height:20px;background:#fff;box-shadow:0 0 0 1px #52606D;border-radius:2px;transform:translateX(-50%)}.track .actual{position:absolute;top:-3px;width:18px;height:18px;border-radius:50%;background:#25C7F4;border:3px solid var(--card-background-color);transform:translateX(-50%)}.track .actual.off-band{background:#FFB300;box-shadow:0 0 0 2px #7A4A00}.rolling{display:grid;grid-template-columns:1fr auto;gap:0 12px;align-items:baseline;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;margin-bottom:12px}.rolling strong{font-size:20px}.rolling small{grid-column:1 / -1}.provenance{margin-top:14px}
+      @media(max-width:600px){.difference{font-size:23px}.totals strong{font-size:25px}.content{padding:16px 12px}.axis{font-size:11px}.month-header{align-items:flex-start;flex-direction:column;gap:1px}.month-flags{text-align:left}.monthly-legend{gap:10px}}`;
   }
 
   async _load() {
@@ -317,7 +377,9 @@ class NhzPrecipitationChart extends HTMLElement {
       return;
     }
     const now = new Date();
-    if (["90d", "365d"].includes(this._config.range)) {
+    // The parent selects this declaratively for cumulative_year. 7/30/90,
+    // and a plain cumulative 365-day curve, remain directly comparable.
+    if (this._config.monthly_rows) {
       this._monthlyView(graph, profile, now);
       return;
     }
@@ -326,18 +388,22 @@ class NhzPrecipitationChart extends HTMLElement {
     const start = this._rangeStart(now, timeZone);
     try {
       const comparison = preliminaryComparison;
-      const comparisonRows = this._comparisonDailyRows(comparison, timeZone);
-      if (!graph.aggregate_source_entity && !comparisonRows) {
+      this._activeUnit = comparison?.unit || profile.attributes.unit_of_measurement || "mm";
+      const cumulativeRows = this._comparisonCumulativeRows(comparison, timeZone);
+      const comparisonRows = cumulativeRows ? null : this._comparisonDailyRows(comparison, timeZone);
+      if (!graph.aggregate_source_entity && !comparisonRows && !cumulativeRows) {
         this._renderMessage("Kumulierte Niederschlagsdaten sind für diesen Zeitraum noch nicht verfügbar.");
         return;
       }
-      const statistics = graph.aggregate_source_entity && !comparisonRows
+      const statistics = graph.aggregate_source_entity && !comparisonRows && !cumulativeRows
         ? await this._statistics(graph.aggregate_source_entity, start, now, "day") : [];
       if (this._generation !== generation) return;
       const actualRows = comparisonRows
         ? comparisonRows.map(point => ({ time: point.time, value: point.actual }))
         : statistics.map(point => ({ time: point.start, value: point.change }));
-      const actual = this._cumulative(actualRows, "time", "value", start.getTime());
+      const actual = cumulativeRows
+        ? cumulativeRows.filter(point => point.actual != null).map(point => [point.time, point.actual])
+        : this._cumulative(actualRows, "time", "value", start.getTime());
       const startKey = this._localDateKey(start, timeZone);
       const endKey = this._localDateKey(now, timeZone);
       const climateRows = comparisonRows
@@ -345,11 +411,17 @@ class NhzPrecipitationChart extends HTMLElement {
         : (profile.attributes.daily_normal || [])
         .filter(point => point.valid_on >= startKey && point.valid_on <= endKey)
         .map(point => ({ time: this._localTime(point.valid_on, timeZone, 12).getTime(), value: point.mean }));
-      const expected = this._cumulative(climateRows, "time", "value", start.getTime());
+      const expected = cumulativeRows
+        ? cumulativeRows.filter(point => point.mean != null).map(point => [point.time, point.mean])
+        : this._cumulative(climateRows, "time", "value", start.getTime());
+      const p10 = cumulativeRows
+        ? cumulativeRows.filter(point => point.p10 != null).map(point => [point.time, point.p10]) : [];
+      const p90 = cumulativeRows
+        ? cumulativeRows.filter(point => point.p90 != null).map(point => [point.time, point.p90]) : [];
       const total = comparison?.total;
       const totalActual = total?.actual || total?.modelled_actual;
       const coverage = this._number(totalActual?.coverage_ratio);
-      if (comparisonRows && coverage != null && coverage < 0.999999) {
+      if ((comparisonRows || cumulativeRows) && coverage != null && coverage < 0.999999) {
         this._renderMessage(`Der Ist-Verlauf ist nur zu ${(coverage * 100).toFixed(0)} % abgedeckt; keine vollständige Summe verfügbar.`);
         return;
       }
@@ -357,25 +429,26 @@ class NhzPrecipitationChart extends HTMLElement {
       const serverExpected = this._number(totalReference.mean_mm ?? totalReference.mean ?? totalReference.p50_mm ?? totalReference.p50);
       const actualTotal = actual.at(-1)?.[1] || 0, expectedTotal = serverExpected ?? expected.at(-1)?.[1] ?? 0;
       actual.push([now.getTime(), actualTotal]);
-      if (serverExpected != null) expected.push([now.getTime(), expectedTotal]);
-      else expected.push([now.getTime(), expectedTotal]);
-      this._render(graph, actualTotal, expectedTotal, this._lineChart(actual, expected, start, now, actualTotal, expectedTotal));
+      expected.push([now.getTime(), expectedTotal]);
+      if (p10.length) p10.push([now.getTime(), p10.at(-1)[1]]);
+      if (p90.length) p90.push([now.getTime(), p90.at(-1)[1]]);
+      this._render(graph, actualTotal, expectedTotal, this._lineChart(actual, expected, start, now, actualTotal, expectedTotal, p10, p90), Boolean(p10.length && p90.length));
     } catch (error) {
       this._renderMessage(`Niederschlagsstatistik konnte nicht geladen werden: ${error.message}`);
     }
   }
 
-  _render(graph, actual, expected, chart) {
+  _render(graph, actual, expected, chart, hasBand = false) {
     const difference = actual - expected;
     const direction = difference >= 0 ? "über" : "unter";
     this.shadowRoot.innerHTML = `<ha-card>
       <div class="content">
         <h2>${this._escapeText(graph.title)} – ${this._escapeText(graph.explanation)}</h2>
-        <div class="difference">${difference >= 0 ? "+" : "−"}${Math.abs(difference).toFixed(0)} mm ${direction} dem Durchschnitt</div>
-        <div class="subtitle">${this._config.range === "7d" ? "7" : "30"}-Tage-Durchschnitt: ${expected.toFixed(0)} mm</div>
-        <div class="totals"><div><strong>${expected.toFixed(0)} mm</strong><span>Durchschnitt</span></div><div><strong>${actual.toFixed(0)} mm</strong><span>Letzte ${this._config.range === "7d" ? "7" : "30"} Tage</span></div></div>
+        <div class="difference">${difference >= 0 ? "+" : "−"}${Math.abs(difference).toFixed(0)} ${this._escapeText(this._activeUnit || "mm")} ${direction} dem Durchschnitt</div>
+        <div class="subtitle">${this._rangeLabel()}-Durchschnitt: ${expected.toFixed(0)} ${this._escapeText(this._activeUnit || "mm")}</div>
+        <div class="totals"><div><strong>${expected.toFixed(0)} ${this._escapeText(this._activeUnit || "mm")}</strong><span>Durchschnitt</span></div><div><strong>${actual.toFixed(0)} ${this._escapeText(this._activeUnit || "mm")}</strong><span>Letzte ${this._rangeLabel()}</span></div></div>
         ${chart}
-        <div class="legend"><span><i class="actual-key"></i>Letzte ${this._config.range === "7d" ? "7" : "30"} Tage</span><span><i class="expected-key"></i>Durchschnitt</span></div>
+        <div class="legend"><span><i class="actual-key"></i>Letzte ${this._rangeLabel()}</span><span><i class="expected-key"></i>Durchschnitt</span>${hasBand ? "<span><i class=\"band-key\"></i>P10–P90</span>" : ""}</div>
       </div>
     </ha-card><style>${this._styles()}</style>`;
   }
@@ -478,19 +551,37 @@ class NhzClimateRangeCard extends HTMLElement {
     return series;
   }
 
+  _displayMode(graph) {
+    const configured = String(graph.display_mode || "").toLowerCase();
+    const aliases = {
+      allgemein: "general",
+      general: "general",
+      kumulativ: "cumulative",
+      cumulative: "cumulative",
+      kumulativ_jahr: "cumulative_year",
+      cumulative_year: "cumulative_year",
+    };
+    if (aliases[configured]) return aliases[configured];
+    // Existing dashboards retain their behavior while migrations can move to
+    // the declarative field above. This intentionally does not inspect a
+    // variable name: rain, snow and all-phase precipitation share the mode.
+    return (graph.precipitation_view || graph.monthly_comparison_entity || graph.monthly_entity)
+      ? "cumulative_year" : "general";
+  }
+
   _chart(graph) {
-    const monthlyComparison = graph.monthly_comparison_entity || graph.monthly_entity;
-    if (monthlyComparison && this._range === "today") {
+    const mode = this._displayMode(graph);
+    if (mode !== "general" && this._range === "today") {
       return {
         type: "markdown",
-        content: `**${graph.title}:** Der Klimavergleich beginnt bei 7 Tagen. Der heutige Verlauf gehört zur operativen Wettervorhersage.`,
+        content: `**${graph.title}:** Für kumulierbare Größen beginnt der Klimavergleich bei 7 Tagen. Der heutige Verlauf gehört zur operativen Wettervorhersage.`,
       };
     }
-    if ((graph.precipitation_view || monthlyComparison) && ["90d", "365d"].includes(this._range)) {
-      return { type: "custom:nhz-precipitation-chart", graph, range: this._range };
+    if (mode === "cumulative_year" && this._range === "365d") {
+      return { type: "custom:nhz-precipitation-chart", graph, range: this._range, monthly_rows: true };
     }
-    if ((graph.precipitation_view || monthlyComparison) && ["7d", "30d"].includes(this._range)) {
-      return { type: "custom:nhz-precipitation-chart", graph, range: this._range };
+    if (mode === "cumulative" || mode === "cumulative_year") {
+      return { type: "custom:nhz-precipitation-chart", graph, range: this._range, monthly_rows: false };
     }
     const today = this._range === "today";
     const spans = { "7d": "7d", "30d": "30d", "90d": "90d", "365d": "365d" };
@@ -546,5 +637,6 @@ if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
+    version: "0.9.0",
   });
 }
