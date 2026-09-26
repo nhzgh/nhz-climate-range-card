@@ -1,0 +1,89 @@
+name: Publish HACS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic card version, for example 0.9.1"
+        required: true
+        type: string
+      commit_sha:
+        description: "Full 40-character commit SHA approved for release"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hacs-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Verify requested card version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          APPROVED_COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          requested = os.environ["REQUESTED_VERSION"].removeprefix("v")
+          approved_sha = os.environ["APPROVED_COMMIT_SHA"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", requested):
+              raise SystemExit(f"Invalid semantic version: {requested}")
+          if not re.fullmatch(r"[0-9a-f]{40}", approved_sha):
+              raise SystemExit("commit_sha must be a full lowercase commit SHA")
+          source = Path("nhz-climate-range-card.js").read_text()
+          match = re.search(r'version:\s*"([^"]+)"', source)
+          if match is None or match.group(1) != requested:
+              raise SystemExit(
+                  f"card version {match.group(1) if match else None!r} != requested {requested!r}"
+              )
+          readme = Path("README.md").read_text()
+          if f"Current feature version: **{requested}**." not in readme:
+              raise SystemExit("README feature version does not match")
+          PY
+          test "$(git rev-parse HEAD)" = "$APPROVED_COMMIT_SHA"
+
+      - name: JavaScript syntax check
+        run: node --check nhz-climate-range-card.js
+
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: plugin
+
+      - name: Create and verify published GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          APPROVED_COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          version="${REQUESTED_VERSION#v}"
+          tag="v${version}"
+          if git ls-remote --exit-code origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            test "$tag_sha" = "$APPROVED_COMMIT_SHA"
+          else
+            git tag "$tag" "$APPROVED_COMMIT_SHA"
+            git push origin "refs/tags/${tag}"
+          fi
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --title "$tag" --generate-notes
+          fi
+          release_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+          test "$release_sha" = "$APPROVED_COMMIT_SHA"
+          gh release view "$tag" \
+            --json tagName,isDraft,isPrerelease,publishedAt \
+            --jq 'select(.tagName == "'"$tag"'" and (.isDraft | not) and (.isPrerelease | not) and .publishedAt != null)'

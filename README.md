@@ -4,6 +4,11 @@ Home Assistant dashboard card distributed through a public GitHub repository. In
 
 Current feature version: **0.9.1**.
 
+Maintainers must publish every deployable version with the **Publish HACS
+release** GitHub Actions workflow. HACS deployments must use that published
+release; commits from the default branch, direct file copies and changed
+content behind an existing release URL are not supported deployment methods.
+
 ## Dependencies and installation
 
 - The NHZ Climate HA integration and its climate-profile entities.
