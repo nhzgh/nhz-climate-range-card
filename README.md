@@ -2,7 +2,9 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.9.1**.
+Current feature version: **0.9.2**.
+
+![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
 Maintainers must publish every deployable version with the **Publish HACS
 release** GitHub Actions workflow. HACS deployments must use that published
