@@ -629,14 +629,216 @@ class NhzClimateRangeCard extends HTMLElement {
   }
 }
 
+class NhzClimateVentilationCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+  }
+
+  setConfig(config) {
+    if (config.entities != null && !Array.isArray(config.entities)) {
+      throw new Error("nhz-climate-ventilation-card entities must be a list");
+    }
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return Math.max(2, 1 + this._entities().length);
+  }
+
+  _escapeText(value) {
+    return String(value ?? "").replace(/[&<>"']/g, character => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+    })[character]);
+  }
+
+  _entities() {
+    if (!this._hass?.states) return [];
+    const configured = this._config?.entities;
+    const entries = configured?.length
+      ? configured.map(entityId => [entityId, this._hass.states[entityId]])
+      : Object.entries(this._hass.states).filter(([, state]) => (
+        state?.attributes?.advisory_only === true
+      ));
+    return entries
+      .filter(([, state]) => state?.attributes?.advisory_only === true)
+      .map(([entityId, state]) => ({ entityId, state }))
+      .sort((left, right) => this._zoneName(left).localeCompare(
+        this._zoneName(right), "de", { sensitivity: "base" },
+      ));
+  }
+
+  _zoneName(row) {
+    const attributes = row.state?.attributes || {};
+    if (attributes.zone_name) return String(attributes.zone_name);
+    const friendly = String(attributes.friendly_name || row.entityId);
+    return friendly.replace(/\s+Fenster öffnen(?:\s+\(Arbeitswert\))?$/i, "");
+  }
+
+  _status(status) {
+    return {
+      ja: { icon: "🪟", label: "Lüften empfohlen", className: "yes" },
+      nein: { icon: "⛔", label: "Nicht lüften", className: "no" },
+      ambivalent: { icon: "⚖️", label: "Abwägen", className: "ambivalent" },
+      optional: { icon: "🌿", label: "Nicht erforderlich, aber unschädlich", className: "optional" },
+      unavailable: { icon: "❔", label: "Daten nicht verfügbar", className: "unavailable" },
+      unknown: { icon: "❔", label: "Daten nicht verfügbar", className: "unavailable" },
+    }[String(status)] || { icon: "❔", label: String(status || "Daten nicht verfügbar"), className: "unavailable" };
+  }
+
+  _reasonCodes(attributes, prefix = "") {
+    const value = attributes[`${prefix}reason_codes`];
+    return Array.isArray(value) ? value.map(String) : [];
+  }
+
+  _effectText(attributes, prefix = "") {
+    const humidity = this._reasonCodes(attributes, `${prefix}humidity_`);
+    const thermal = this._reasonCodes(attributes, `${prefix}thermal_`);
+    const parts = [];
+    if (humidity.includes("dehumidification_benefit")) parts.push("🏜️ führt Feuchte günstig ab");
+    else if (humidity.includes("dehumidification_harm")) parts.push("🏜️ trocknet unerwünscht");
+    else if (humidity.includes("humidification_benefit")) parts.push("💧 bringt günstig Feuchte ein");
+    else if (humidity.includes("humidification_harm")) parts.push("💧 bringt unerwünscht Feuchte ein");
+    else if (humidity.includes("humidity_within_acceptance_corridor")) parts.push("💧 Feuchte im Zielkorridor");
+    else if (humidity.includes("humidity_potential_neutral")) parts.push("💧 kaum Feuchteänderung");
+
+    if (thermal.includes("cooling_benefit")) parts.push("❄️ kühlt günstig");
+    else if (thermal.includes("cooling_harm")) parts.push("❄️ kühlt unerwünscht");
+    else if (thermal.includes("warming_benefit")) parts.push("🔥 wärmt günstig");
+    else if (thermal.includes("warming_harm")) parts.push("🔥 wärmt unerwünscht");
+    else if (thermal.includes("temperature_within_acceptance_corridor")) parts.push("🌡️ Temperatur im Zielkorridor");
+    else if (thermal.includes("thermal_potential_neutral")) parts.push("🌡️ kaum Wärmeänderung");
+    else if (thermal.includes("sensible_enthalpy_conflict")) parts.push("↔️ Wärmebewertung widersprüchlich");
+    return parts.join(" · ");
+  }
+
+  _pending(attributes) {
+    if (attributes.pending !== true || !attributes.candidate_status) return "";
+    const candidate = this._status(attributes.candidate_status);
+    const seconds = Number(attributes.candidate_remaining_seconds);
+    const remaining = Number.isFinite(seconds) && seconds > 0
+      ? ` · noch ${Math.max(1, Math.ceil(seconds / 60))} min`
+      : "";
+    const effects = this._effectText(attributes, "candidate_");
+    return `<div class="pending"><strong>Wird geprüft:</strong> ${candidate.icon} ${this._escapeText(candidate.label)}${remaining}${effects ? `<small>${this._escapeText(effects)}</small>` : ""}</div>`;
+  }
+
+  _safety(attributes) {
+    if (attributes.safety_lock_active !== true) return "";
+    const reasons = this._reasonCodes(attributes, "current_weather_");
+    const labels = [];
+    if (reasons.some(reason => reason.startsWith("rain"))) labels.push("Regen");
+    if (reasons.some(reason => reason.includes("gust"))) labels.push("starke Böen");
+    return `<div class="safety">🔒 Aktive Sicherheitssperre${labels.length ? `: ${this._escapeText(labels.join(" und "))}` : ""}</div>`;
+  }
+
+  _summary(rows) {
+    if (!rows.length) return { icon: "❔", text: "Keine Lüftungszonen gefunden", detail: "", className: "unavailable" };
+    const counts = rows.reduce((result, row) => {
+      const key = String(row.state.state);
+      result[key] = (result[key] || 0) + 1;
+      return result;
+    }, {});
+    const locked = rows.filter(row => row.state.attributes?.safety_lock_active === true).length;
+    const unavailable = (counts.unavailable || 0) + (counts.unknown || 0);
+    const distribution = [
+      counts.ja ? `${counts.ja} empfohlen` : "",
+      counts.nein ? `${counts.nein} nicht empfohlen` : "",
+      counts.ambivalent ? `${counts.ambivalent} abzuwägen` : "",
+      counts.optional ? `${counts.optional} optional` : "",
+      unavailable ? `${unavailable} ohne Daten` : "",
+    ].filter(Boolean).join(" · ");
+    if (locked) return {
+      icon: "🔒", text: `Aktive Sicherheitssperre in ${locked} ${locked === 1 ? "Raum" : "Räumen"}`,
+      detail: distribution, className: "no",
+    };
+    const represented = [counts.ja, counts.nein, counts.ambivalent, counts.optional, unavailable]
+      .filter(Boolean).length;
+    if (represented > 1) return {
+      icon: "↔️", text: "Räume unterschiedlich bewerten", detail: distribution, className: "ambivalent",
+    };
+    if (counts.ja) return { icon: "🪟", text: "Lüften empfohlen", detail: distribution, className: "yes" };
+    if (counts.ambivalent) return { icon: "⚖️", text: "Lüften je nach Ziel abwägen", detail: distribution, className: "ambivalent" };
+    if (counts.nein) return { icon: "⛔", text: "Lüften derzeit nicht empfohlen", detail: distribution, className: "no" };
+    if (counts.optional) return { icon: "🌿", text: "Lüften nicht erforderlich, aber unschädlich", detail: distribution, className: "optional" };
+    return { icon: "❔", text: "Bewertung derzeit nicht verfügbar", detail: distribution, className: "unavailable" };
+  }
+
+  _openMoreInfo(entityId) {
+    const event = new CustomEvent("hass-more-info", {
+      detail: { entityId }, bubbles: true, composed: true,
+    });
+    this.dispatchEvent(event);
+  }
+
+  _bindRows() {
+    this.shadowRoot.querySelectorAll?.("button.zone").forEach(button => {
+      button.addEventListener("click", () => this._openMoreInfo(button.dataset.entityId));
+    });
+  }
+
+  _render() {
+    if (!this._config || !this.shadowRoot) return;
+    const rows = this._entities();
+    const summary = this._summary(rows);
+    const body = rows.map(row => {
+      const attributes = row.state.attributes || {};
+      const status = this._status(row.state.state);
+      const effects = this._effectText(attributes);
+      return `<button class="zone ${status.className}" data-entity-id="${this._escapeText(row.entityId)}" type="button">
+        <span class="zone-icon">${status.icon}</span>
+        <span class="zone-content"><span class="zone-heading"><strong>${this._escapeText(this._zoneName(row))}</strong><span>${this._escapeText(status.label)}</span></span>
+        ${this._safety(attributes)}
+        ${effects ? `<small class="effects">${this._escapeText(effects)}</small>` : ""}
+        ${this._pending(attributes)}</span>
+        <ha-icon icon="mdi:chevron-right"></ha-icon>
+      </button>`;
+    }).join("");
+    this.shadowRoot.innerHTML = `<ha-card>
+      <div class="content">
+        <h2>${this._escapeText(this._config.title || "Lüftung")}</h2>
+        <div class="summary ${summary.className}"><span>${summary.icon}</span><span class="summary-copy"><strong>${this._escapeText(summary.text)}</strong>${summary.detail ? `<small>${this._escapeText(summary.detail)}</small>` : ""}</span></div>
+        <div class="zones">${body || `<div class="empty">Keine Entität mit <code>advisory_only: true</code> gefunden.</div>`}</div>
+        <div class="notice">Arbeitswerte · keine automatische Fenster- oder HVAC-Steuerung</div>
+      </div>
+    </ha-card><style>
+      .content{padding:18px 18px 14px;color:var(--primary-text-color)}h2{margin:0 0 14px;font-size:22px}
+      .summary{display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:12px;margin-bottom:12px;background:var(--secondary-background-color)}
+      .summary-copy{display:grid;gap:2px}.summary-copy small{color:var(--secondary-text-color);font-size:12px}
+      .summary.yes{border-left:5px solid #2E7D32}.summary.no{border-left:5px solid #C62828}.summary.ambivalent{border-left:5px solid #F9A825}.summary.optional{border-left:5px solid #00897B}.summary.unavailable{border-left:5px solid #757575}
+      .zones{display:grid;gap:8px}.zone{appearance:none;width:100%;border:1px solid var(--divider-color);border-radius:12px;background:transparent;color:inherit;padding:12px;display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:center;text-align:left;font:inherit;cursor:pointer}
+      .zone:hover{background:var(--secondary-background-color)}.zone:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}.zone-icon{font-size:22px}.zone-content{min-width:0;display:grid;gap:5px}.zone-heading{display:flex;justify-content:space-between;gap:12px;align-items:baseline}.zone-heading span{color:var(--secondary-text-color);text-align:right}.effects{color:var(--secondary-text-color)}
+      .pending{padding:7px 9px;border-radius:8px;background:color-mix(in srgb,var(--primary-color) 12%,transparent);font-size:13px}.pending small{display:block;margin-top:3px;color:var(--secondary-text-color)}.safety{font-weight:650;color:var(--error-color,#db4437)}
+      .notice,.empty{color:var(--secondary-text-color);font-size:12px}.notice{margin-top:12px}.empty{padding:12px 2px}ha-icon{color:var(--secondary-text-color)}
+      @media(max-width:500px){.zone-heading{display:grid;gap:2px}.zone-heading span{text-align:left}}
+    </style>`;
+    this._bindRows();
+  }
+}
+
 if (!customElements.get("nhz-climate-range-card")) customElements.define("nhz-climate-range-card", NhzClimateRangeCard);
 if (!customElements.get("nhz-precipitation-chart")) customElements.define("nhz-precipitation-chart", NhzPrecipitationChart);
+if (!customElements.get("nhz-climate-ventilation-card")) customElements.define("nhz-climate-ventilation-card", NhzClimateVentilationCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
   window.customCards.push({
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.9.2",
+    version: "0.9.3",
+  });
+}
+if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
+  window.customCards.push({
+    type: "nhz-climate-ventilation-card",
+    name: "NHZ Climate Ventilation Card",
+    description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
+    version: "0.9.3",
   });
 }

@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.9.2**.
+Current feature version: **0.9.3**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -38,3 +38,29 @@ graphs:
 `cumulative` uses the same cumulative curve for all non-today ranges, while `general` uses the normal variable chart. Snow can use either cumulative mode without a special variable name. For every cumulative mode, **Heute** deliberately displays a note: seven days are the smallest meaningful comparison window. The `rain` actual can combine a configured local gauge, ERA5, and archived ICON hour by hour. For all-phase `precipitation`, the integration replaces only the modelled liquid component with that gauge and retains the modelled solid-water equivalent. Incomplete coverage is marked, not silently interpreted as zero.
 
 `precipitation_view` remains a compatibility alias for existing dashboards, but new configurations should use `display_mode`.
+
+## Ventilation card
+
+`custom:nhz-climate-ventilation-card` discovers the local NHZ Climate
+ventilation decision entities through their `advisory_only` attribute. It
+shows one clickable row per room plus a summary; clicking a row opens Home
+Assistant's normal more-info dialog. The main value is always the last
+confirmed recommendation. During the 15-minute stability interval, the
+candidate, remaining time and its separate humidity/thermal assessment appear
+as a secondary “Wird geprüft” block. Active rain or gust safety locks are
+labelled explicitly.
+
+```yaml
+type: custom:nhz-climate-ventilation-card
+title: Lüftung
+```
+
+To limit the card to selected rooms, pass their decision entity IDs explicitly:
+
+```yaml
+type: custom:nhz-climate-ventilation-card
+title: Lüftung Erdgeschoss
+entities:
+  - sensor.example_living_room_window_decision
+  - sensor.example_kitchen_window_decision
+```
