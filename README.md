@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.9.3**.
+Current feature version: **0.10.0**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -47,8 +47,12 @@ shows one clickable row per room plus a summary; clicking a row opens Home
 Assistant's normal more-info dialog. The main value is always the last
 confirmed recommendation. During the 15-minute stability interval, the
 candidate, remaining time and its separate humidity/thermal assessment appear
-as a secondary “Wird geprüft” block. Active rain or gust safety locks are
-labelled explicitly.
+as a secondary “Wird geprüft” block. When the advisory entity exposes the
+optional indoor-climate projection attributes, each room also shows its compact
+climate status, target deltas, and the estimated 1-hour and 8-hour result. A
+theoretical air-only result is available as a mouseover labelled “Luftgrenze”.
+Technical psychrometric values are intentionally kept out of the visible card.
+Active rain or gust safety locks are labelled explicitly.
 
 ```yaml
 type: custom:nhz-climate-ventilation-card

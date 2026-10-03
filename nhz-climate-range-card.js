@@ -681,6 +681,153 @@ class NhzClimateVentilationCard extends HTMLElement {
     return friendly.replace(/\s+Fenster öffnen(?:\s+\(Arbeitswert\))?$/i, "");
   }
 
+  _number(value) {
+    if (value == null || value === "" || typeof value === "boolean") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  _firstNumber(attributes, keys) {
+    for (const key of keys) {
+      const value = this._number(attributes?.[key]);
+      if (value != null) return value;
+    }
+    return null;
+  }
+
+  _formatClimate(value, digits = 1) {
+    const number = this._number(value);
+    return number == null ? "–" : number.toFixed(digits).replace(".", ",");
+  }
+
+  _signed(value, suffix = "", digits = 1) {
+    const number = this._number(value);
+    if (number == null) return "–";
+    return `${number >= 0 ? "+" : "−"}${this._formatClimate(Math.abs(number), digits)}${suffix}`;
+  }
+
+  _climateValues(attributes) {
+    const projection = attributes?.ventilation_projection || {};
+    const current = projection.current || {};
+    const targets = projection.targets || {};
+    const temperatureCorridor = Array.isArray(targets.temperature_acceptance_c)
+      ? targets.temperature_acceptance_c : [20, 24];
+    const humidityCorridor = Array.isArray(targets.relative_humidity_acceptance_percent)
+      ? targets.relative_humidity_acceptance_percent : [40, 60];
+    const temperature = this._firstNumber(attributes, [
+      "current_temperature_c",
+      "indoor_temperature", "current_indoor_temperature", "indoor_temperature_c", "current_temperature",
+    ]) ?? this._firstNumber(current, ["temperature_c", "temperature"]);
+    const humidity = this._firstNumber(attributes, [
+      "current_relative_humidity_percent",
+      "indoor_relative_humidity", "current_indoor_relative_humidity", "indoor_relative_humidity_percent",
+      "current_humidity", "relative_humidity",
+    ]) ?? this._firstNumber(current, ["relative_humidity_percent", "relative_humidity", "humidity"]);
+    const targetTemperature = this._firstNumber(attributes, [
+      "target_temperature", "target_temperature_c", "temperature_target", "comfort_temperature",
+    ]) ?? this._firstNumber(targets, ["temperature_c", "temperature"]) ?? 22;
+    const targetHumidity = this._firstNumber(attributes, [
+      "target_relative_humidity", "target_humidity", "target_relative_humidity_percent", "humidity_target",
+    ]) ?? this._firstNumber(targets, ["relative_humidity_percent", "relative_humidity", "humidity"]) ?? 50;
+    const temperatureDelta = temperature == null ? null : temperature - targetTemperature;
+    const humidityDelta = humidity == null ? null : humidity - targetHumidity;
+    return {
+      temperature, humidity, targetTemperature, targetHumidity, temperatureDelta, humidityDelta,
+      temperatureMin: this._number(temperatureCorridor[0]) ?? 20,
+      temperatureMax: this._number(temperatureCorridor[1]) ?? 24,
+      humidityMin: this._number(humidityCorridor[0]) ?? 40,
+      humidityMax: this._number(humidityCorridor[1]) ?? 60,
+    };
+  }
+
+  _projection(attributes, hours) {
+    const suffix = `${hours}h`;
+    const contract = attributes?.ventilation_projection || {};
+    const contractHorizon = contract.horizons?.[suffix];
+    if (contract.available === false && !attributes?.[`projection_${suffix}`]
+      && !attributes?.[`projected_${suffix}`]) return null;
+    const nested = attributes?.[`projection_${suffix}`]
+      || attributes?.[`projected_${suffix}`]
+      || attributes?.[`projection_${hours}`]
+      || attributes?.[`projected_${hours}`]
+      || contractHorizon
+      || {};
+    if (attributes?.[`projection_${suffix}_available`] === false
+      || attributes?.[`projection_${hours}_available`] === false) return null;
+    if (contractHorizon?.available === false) return null;
+    const temperature = this._firstNumber(nested, ["temperature", "temperature_c", "indoor_temperature", "projected_temperature"])
+      ?? this._firstNumber(attributes, [
+        `projection_${suffix}_temperature`, `projected_${suffix}_temperature`, `projected_temperature_${suffix}`,
+        `temperature_projection_${suffix}`, `temperature_${suffix}`,
+      ]);
+    const humidity = this._firstNumber(nested, ["relative_humidity", "relative_humidity_percent", "humidity", "projected_humidity"])
+      ?? this._firstNumber(attributes, [
+        `projection_${suffix}_relative_humidity`, `projection_${suffix}_humidity`,
+        `projected_${suffix}_relative_humidity`, `projected_${suffix}_humidity`,
+        `projected_humidity_${suffix}`, `humidity_${suffix}`,
+      ]);
+    if (temperature == null && humidity == null) return null;
+    const theoreticalTemperature = this._firstNumber(nested, ["air_only_temperature", "air_only_temperature_c", "theoretical_temperature", "air_limit_temperature"])
+      ?? this._firstNumber(attributes, [
+        `projection_${suffix}_air_only_temperature`, `projection_${suffix}_theoretical_temperature`,
+        `air_only_temperature_${suffix}`, `theoretical_temperature_${suffix}`,
+      ]);
+    const theoreticalHumidity = this._firstNumber(nested, ["air_only_relative_humidity", "air_only_relative_humidity_percent", "theoretical_relative_humidity", "air_limit_relative_humidity"])
+      ?? this._firstNumber(attributes, [
+        `projection_${suffix}_air_only_relative_humidity`, `projection_${suffix}_theoretical_relative_humidity`,
+        `air_only_relative_humidity_${suffix}`, `theoretical_relative_humidity_${suffix}`,
+      ]);
+    return { temperature, humidity, theoreticalTemperature, theoreticalHumidity };
+  }
+
+  _climateLabel(values) {
+    const { temperature, humidity, temperatureMin, temperatureMax, humidityMin, humidityMax } = values;
+    const temperatureOutside = temperature != null && (temperature < temperatureMin || temperature > temperatureMax);
+    const humidityOutside = humidity != null && (humidity < humidityMin || humidity > humidityMax);
+    if (!temperatureOutside && !humidityOutside) return { icon: "🌡️", label: "Im Zielbereich", className: "neutral" };
+    if (humidityOutside) {
+      return humidity > humidityMax
+        ? { icon: "💧", label: "Zu feucht", className: "humid" }
+        : { icon: "🏜️", label: "Zu trocken", className: "dry" };
+    }
+    if (temperatureOutside) {
+      return temperature > temperatureMax
+        ? { icon: "🔥", label: "Zu warm", className: "warm" }
+        : { icon: "❄️", label: "Zu kalt", className: "cold" };
+    }
+    return { icon: "🌡️", label: "Im Zielbereich", className: "neutral" };
+  }
+
+  _climateSummary(attributes) {
+    const values = this._climateValues(attributes);
+    if (values.temperature == null && values.humidity == null) return "";
+    const climate = this._climateLabel(values);
+    const current = [];
+    if (values.temperature != null) current.push(`${this._formatClimate(values.temperature)} °C`);
+    if (values.humidity != null) current.push(`${this._formatClimate(values.humidity, 0)} % rF`);
+    const deltas = [];
+    if (values.temperatureDelta != null) deltas.push(this._signed(values.temperatureDelta, " K", 1));
+    if (values.humidityDelta != null) deltas.push(this._signed(values.humidityDelta, " Pkt.", 0));
+    return `<div class="climate ${climate.className}"><strong>${climate.icon} ${climate.label}</strong><span>${this._escapeText(current.join(" · "))}${deltas.length ? ` <small>(${this._escapeText(deltas.join(" · "))} zum Ziel)</small>` : ""}</span></div>`;
+  }
+
+  _projectionSummary(attributes) {
+    const lines = [1, 8].map(hours => {
+      const projection = this._projection(attributes, hours);
+      if (!projection) return "";
+      const values = [];
+      if (projection.temperature != null) values.push(`❄️ ${this._formatClimate(projection.temperature)} °C`);
+      if (projection.humidity != null) values.push(`💧 ${this._formatClimate(projection.humidity, 0)} %`);
+      if (!values.length) return "";
+      const theoretical = [];
+      if (projection.theoreticalTemperature != null) theoretical.push(`Luftgrenze ${this._formatClimate(projection.theoreticalTemperature)} °C`);
+      if (projection.theoreticalHumidity != null) theoretical.push(`Luftgrenze ${this._formatClimate(projection.theoreticalHumidity, 0)} %`);
+      const title = theoretical.length ? ` title="${this._escapeText(theoretical.join(" · "))}"` : "";
+      return `<span class="projection"${title}>${hours} h&nbsp; ${this._escapeText(values.join(" · "))}</span>`;
+    }).filter(Boolean);
+    return lines.length ? `<div class="projections">${lines.join("")}</div>` : "";
+  }
+
   _status(status) {
     return {
       ja: { icon: "🪟", label: "Lüften empfohlen", className: "yes" },
@@ -794,6 +941,8 @@ class NhzClimateVentilationCard extends HTMLElement {
       return `<button class="zone ${status.className}" data-entity-id="${this._escapeText(row.entityId)}" type="button">
         <span class="zone-icon">${status.icon}</span>
         <span class="zone-content"><span class="zone-heading"><strong>${this._escapeText(this._zoneName(row))}</strong><span>${this._escapeText(status.label)}</span></span>
+        ${this._climateSummary(attributes)}
+        ${this._projectionSummary(attributes)}
         ${this._safety(attributes)}
         ${effects ? `<small class="effects">${this._escapeText(effects)}</small>` : ""}
         ${this._pending(attributes)}</span>
@@ -805,17 +954,18 @@ class NhzClimateVentilationCard extends HTMLElement {
         <h2>${this._escapeText(this._config.title || "Lüftung")}</h2>
         <div class="summary ${summary.className}"><span>${summary.icon}</span><span class="summary-copy"><strong>${this._escapeText(summary.text)}</strong>${summary.detail ? `<small>${this._escapeText(summary.detail)}</small>` : ""}</span></div>
         <div class="zones">${body || `<div class="empty">Keine Entität mit <code>advisory_only: true</code> gefunden.</div>`}</div>
-        <div class="notice">Arbeitswerte · keine automatische Fenster- oder HVAC-Steuerung</div>
       </div>
     </ha-card><style>
       .content{padding:18px 18px 14px;color:var(--primary-text-color)}h2{margin:0 0 14px;font-size:22px}
       .summary{display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:12px;margin-bottom:12px;background:var(--secondary-background-color)}
       .summary-copy{display:grid;gap:2px}.summary-copy small{color:var(--secondary-text-color);font-size:12px}
       .summary.yes{border-left:5px solid #2E7D32}.summary.no{border-left:5px solid #C62828}.summary.ambivalent{border-left:5px solid #F9A825}.summary.optional{border-left:5px solid #00897B}.summary.unavailable{border-left:5px solid #757575}
-      .zones{display:grid;gap:8px}.zone{appearance:none;width:100%;border:1px solid var(--divider-color);border-radius:12px;background:transparent;color:inherit;padding:12px;display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:center;text-align:left;font:inherit;cursor:pointer}
-      .zone:hover{background:var(--secondary-background-color)}.zone:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}.zone-icon{font-size:22px}.zone-content{min-width:0;display:grid;gap:5px}.zone-heading{display:flex;justify-content:space-between;gap:12px;align-items:baseline}.zone-heading span{color:var(--secondary-text-color);text-align:right}.effects{color:var(--secondary-text-color)}
+      .zones{display:grid;gap:8px}.zone{appearance:none;width:100%;border:1px solid var(--divider-color);border-radius:12px;background:transparent;color:inherit;padding:10px 12px;display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:center;text-align:left;font:inherit;cursor:pointer}
+      .zone:hover{background:var(--secondary-background-color)}.zone:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}.zone-icon{font-size:22px}.zone-content{min-width:0;display:grid;gap:4px}.zone-heading{display:flex;justify-content:space-between;gap:12px;align-items:baseline}.zone-heading span{color:var(--secondary-text-color);text-align:right}.effects{color:var(--secondary-text-color)}
+      .climate{display:flex;flex-wrap:wrap;gap:3px 9px;align-items:baseline}.climate strong{font-size:14px}.climate span{font-variant-numeric:tabular-nums}.climate small{color:var(--secondary-text-color);font-size:11px}.climate.humid strong{color:#1976D2}.climate.dry strong{color:#D68910}.climate.warm strong{color:#E65100}.climate.cold strong{color:#1565C0}.climate.neutral strong{color:var(--secondary-text-color)}
+      .projections{display:flex;flex-wrap:wrap;gap:3px 14px;color:var(--secondary-text-color);font-size:12px;font-variant-numeric:tabular-nums}.projection{white-space:nowrap}
       .pending{padding:7px 9px;border-radius:8px;background:color-mix(in srgb,var(--primary-color) 12%,transparent);font-size:13px}.pending small{display:block;margin-top:3px;color:var(--secondary-text-color)}.safety{font-weight:650;color:var(--error-color,#db4437)}
-      .notice,.empty{color:var(--secondary-text-color);font-size:12px}.notice{margin-top:12px}.empty{padding:12px 2px}ha-icon{color:var(--secondary-text-color)}
+      .empty{color:var(--secondary-text-color);font-size:12px;padding:12px 2px}ha-icon{color:var(--secondary-text-color)}
       @media(max-width:500px){.zone-heading{display:grid;gap:2px}.zone-heading span{text-align:left}}
     </style>`;
     this._bindRows();
@@ -831,7 +981,7 @@ if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.9.3",
+    version: "0.10.0",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
@@ -839,6 +989,6 @@ if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card
     type: "nhz-climate-ventilation-card",
     name: "NHZ Climate Ventilation Card",
     description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
-    version: "0.9.3",
+    version: "0.10.0",
   });
 }
