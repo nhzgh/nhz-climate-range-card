@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.10.0**.
+Current feature version: **0.11.0**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -53,6 +53,14 @@ climate status, target deltas, and the estimated 1-hour and 8-hour result. A
 theoretical air-only result is available as a mouseover labelled “Luftgrenze”.
 Technical psychrometric values are intentionally kept out of the visible card.
 Active rain or gust safety locks are labelled explicitly.
+
+When the advisory entity publishes `recommended_action`, the room heading uses
+the duration-aware label `Stoßlüften · N min`, `Lüften empfohlen`,
+`Nachtlüften möglich`, `Nicht lüften`, or `Nicht erforderlich`. A configured
+`recommended_duration_minutes` selects the corresponding 15-minute projection
+(`15m`, `30m`, `45m`, `60m`) plus the `8h` projection; older `1h`/`8h`
+attributes remain supported. Optional normalized target-distance values are
+available as a heading mouseover and are not shown as technical card content.
 
 ```yaml
 type: custom:nhz-climate-ventilation-card

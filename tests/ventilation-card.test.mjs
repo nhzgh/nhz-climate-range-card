@@ -68,3 +68,135 @@ test("omits optional projection lines when attributes are absent", () => {
   assert.equal(card._climateSummary({}), "");
   assert.equal(card._projectionSummary({}), "");
 });
+
+test("renders duration-aware action and selected 15-minute projection", () => {
+  const card = new Card();
+  const attrs = {
+    recommended_action: "short_airing",
+    recommended_duration_minutes: 30,
+    limiting_factor: "humidity",
+    target_distance_before: 1.2,
+    target_distance_after: 0.7,
+    ventilation_projection: {
+      duration_recommendation: {
+        recommended_action: "short_airing",
+        recommended_duration_minutes: 30,
+      },
+      trajectory_summary: {
+        "30m": { available: true, temperature_c: 22.8, relative_humidity_percent: 61 },
+        "8h": { available: true, temperature_c: 20.9, relative_humidity_percent: 84 },
+      },
+    },
+  };
+  assert.equal(card._actionLabel(attrs, "Lüften empfohlen"), "Stoßlüften · 30 min");
+  const projections = card._projectionSummary(attrs);
+  assert.match(projections, /30 min/);
+  assert.match(projections, /22,8 °C/);
+  assert.match(projections, /8 h/);
+  assert.doesNotMatch(projections, /1 h/);
+});
+
+test("maps overnight and avoid actions to compact labels", () => {
+  const card = new Card();
+  assert.equal(card._actionLabel({ recommended_action: "overnight" }, "Lüften empfohlen"), "Nachtlüften möglich");
+  assert.equal(card._actionLabel({ recommended_action: "avoid" }, "Lüften empfohlen"), "Nicht lüften");
+});
+
+test("pending block renders candidate action instead of confirmed action", () => {
+  const card = new Card();
+  const attrs = {
+    recommended_action: "overnight",
+    recommended_duration_minutes: 480,
+    pending: true,
+    candidate_status: "ja",
+    candidate_recommended_action: "short_airing",
+    candidate_recommended_duration_minutes: 30,
+    candidate_remaining_seconds: 600,
+  };
+  const pending = card._pending(attrs);
+  assert.match(pending, /Stoßlüften · 30 min/);
+  assert.doesNotMatch(pending, /Nachtlüften möglich/);
+});
+
+test("does not duplicate the eight-hour endpoint for overnight action", () => {
+  const card = new Card();
+  const attrs = {
+    recommended_action: "overnight",
+    recommended_duration_minutes: 480,
+    ventilation_projection: {
+      duration_recommendation: {
+        recommended_action: "overnight",
+        recommended_duration_minutes: 480,
+      },
+      trajectory_summary: {
+        "480m": { available: true, temperature_c: 20.9, relative_humidity_percent: 84 },
+      },
+      horizons: {
+        "8h": { available: true, temperature_c: 20.9, relative_humidity_percent: 84 },
+      },
+    },
+  };
+  const projections = card._projectionSummary(attrs);
+  assert.equal((projections.match(/20,9 °C/g) || []).length, 1);
+  assert.match(projections, /8 h/);
+  assert.doesNotMatch(projections, /480 min/);
+});
+
+test("stabilized top-level safety action overrides raw nested projection", () => {
+  const card = new Card();
+  const attrs = {
+    recommended_action: "avoid",
+    recommended_duration_minutes: null,
+    limiting_factor: "rain",
+    safety_lock_active: true,
+    ventilation_projection: {
+      duration_recommendation: {
+        recommended_action: "short_airing",
+        recommended_duration_minutes: 30,
+        limiting_factor: "humidity",
+      },
+    },
+  };
+  assert.equal(card._actionLabel(attrs, "Lüften empfohlen"), "Nicht lüften");
+  assert.equal(card._status("nein", attrs).label, "Nicht lüften");
+});
+
+test("initial pending state does not expose raw nested action in the main row", () => {
+  const card = new Card();
+  const attrs = {
+    pending: true,
+    recommended_action: null,
+    recommended_duration_minutes: null,
+    candidate_status: "ja",
+    candidate_recommended_action: "short_airing",
+    candidate_recommended_duration_minutes: 30,
+    ventilation_projection: {
+      duration_recommendation: {
+        recommended_action: "short_airing",
+        recommended_duration_minutes: 30,
+      },
+    },
+  };
+  assert.equal(card._actionLabel(attrs, "Daten nicht verfügbar"), "Daten nicht verfügbar");
+  assert.match(card._pending(attrs), /Stoßlüften · 30 min/);
+});
+
+test("explicit null safety duration does not select raw short projection", () => {
+  const card = new Card();
+  const attrs = {
+    recommended_action: "avoid",
+    recommended_duration_minutes: null,
+    ventilation_projection: {
+      duration_recommendation: {
+        recommended_action: "short_airing",
+        recommended_duration_minutes: 30,
+      },
+      trajectory_summary: {
+        "30m": { available: true, temperature_c: 22.8, relative_humidity_percent: 61 },
+        "8h": { available: true, temperature_c: 20.9, relative_humidity_percent: 84 },
+      },
+    },
+  };
+  const projections = card._projectionSummary(attrs);
+  assert.doesNotMatch(projections, /30 min/);
+});

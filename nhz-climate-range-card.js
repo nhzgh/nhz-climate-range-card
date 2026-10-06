@@ -740,44 +740,100 @@ class NhzClimateVentilationCard extends HTMLElement {
     };
   }
 
-  _projection(attributes, hours) {
-    const suffix = `${hours}h`;
+  _projectionPeriod(attributes, suffix, hours = null) {
+    const legacySuffix = hours == null ? suffix : `${hours}h`;
     const contract = attributes?.ventilation_projection || {};
-    const contractHorizon = contract.horizons?.[suffix];
+    const contractHorizon = contract.trajectory_summary?.[suffix]
+      || contract.trajectory?.[suffix]
+      || contract.horizons?.[suffix];
     if (contract.available === false && !attributes?.[`projection_${suffix}`]
-      && !attributes?.[`projected_${suffix}`]) return null;
+      && !attributes?.[`projected_${suffix}`]
+      && !attributes?.[`projection_${legacySuffix}`]
+      && !attributes?.[`projected_${legacySuffix}`]) return null;
     const nested = attributes?.[`projection_${suffix}`]
       || attributes?.[`projected_${suffix}`]
-      || attributes?.[`projection_${hours}`]
-      || attributes?.[`projected_${hours}`]
+      || attributes?.[`projection_${legacySuffix}`]
+      || attributes?.[`projected_${legacySuffix}`]
       || contractHorizon
       || {};
     if (attributes?.[`projection_${suffix}_available`] === false
-      || attributes?.[`projection_${hours}_available`] === false) return null;
+      || attributes?.[`projection_${legacySuffix}_available`] === false) return null;
     if (contractHorizon?.available === false) return null;
     const temperature = this._firstNumber(nested, ["temperature", "temperature_c", "indoor_temperature", "projected_temperature"])
       ?? this._firstNumber(attributes, [
         `projection_${suffix}_temperature`, `projected_${suffix}_temperature`, `projected_temperature_${suffix}`,
+        `projection_${legacySuffix}_temperature`, `projected_${legacySuffix}_temperature`, `projected_temperature_${legacySuffix}`,
         `temperature_projection_${suffix}`, `temperature_${suffix}`,
       ]);
     const humidity = this._firstNumber(nested, ["relative_humidity", "relative_humidity_percent", "humidity", "projected_humidity"])
       ?? this._firstNumber(attributes, [
         `projection_${suffix}_relative_humidity`, `projection_${suffix}_humidity`,
         `projected_${suffix}_relative_humidity`, `projected_${suffix}_humidity`,
+        `projection_${legacySuffix}_relative_humidity`, `projection_${legacySuffix}_humidity`,
+        `projected_${legacySuffix}_relative_humidity`, `projected_${legacySuffix}_humidity`,
         `projected_humidity_${suffix}`, `humidity_${suffix}`,
       ]);
     if (temperature == null && humidity == null) return null;
     const theoreticalTemperature = this._firstNumber(nested, ["air_only_temperature", "air_only_temperature_c", "theoretical_temperature", "air_limit_temperature"])
       ?? this._firstNumber(attributes, [
         `projection_${suffix}_air_only_temperature`, `projection_${suffix}_theoretical_temperature`,
+        `projection_${legacySuffix}_air_only_temperature`, `projection_${legacySuffix}_theoretical_temperature`,
         `air_only_temperature_${suffix}`, `theoretical_temperature_${suffix}`,
       ]);
     const theoreticalHumidity = this._firstNumber(nested, ["air_only_relative_humidity", "air_only_relative_humidity_percent", "theoretical_relative_humidity", "air_limit_relative_humidity"])
       ?? this._firstNumber(attributes, [
         `projection_${suffix}_air_only_relative_humidity`, `projection_${suffix}_theoretical_relative_humidity`,
+        `projection_${legacySuffix}_air_only_relative_humidity`, `projection_${legacySuffix}_theoretical_relative_humidity`,
         `air_only_relative_humidity_${suffix}`, `theoretical_relative_humidity_${suffix}`,
       ]);
-    return { temperature, humidity, theoreticalTemperature, theoreticalHumidity };
+    return { key: suffix, temperature, humidity, theoreticalTemperature, theoreticalHumidity };
+  }
+
+  _projection(attributes, hours) {
+    return this._projectionPeriod(attributes, `${hours}h`, hours);
+  }
+
+  _recommendation(attributes) {
+    const projection = attributes?.ventilation_projection || {};
+    const recommendation = projection.duration_recommendation
+      || attributes?.ventilation_recommendation
+      || projection.recommendation
+      || {};
+    // The top-level values are the stabilized/weather-limited contract.  The
+    // nested projection is a raw model result and must never override a
+    // top-level safety decision such as `avoid`.
+    const hasOwn = key => Object.prototype.hasOwnProperty.call(attributes || {}, key);
+    const authoritativeAction = hasOwn("recommended_action");
+    const topLevelAction = String(attributes?.recommended_action ?? "").trim().toLowerCase();
+    const action = authoritativeAction ? topLevelAction : String(
+      recommendation.recommended_action ?? recommendation.action ?? projection.recommended_action ?? "",
+    ).trim().toLowerCase();
+    const authoritativeDuration = hasOwn("recommended_duration_minutes")
+      || hasOwn("ventilation_duration_minutes");
+    const duration = authoritativeDuration
+      ? this._firstNumber(attributes, ["recommended_duration_minutes", "ventilation_duration_minutes"])
+      : this._firstNumber(recommendation, ["recommended_duration_minutes", "duration_minutes"]);
+    const limiting = String(
+      attributes?.limiting_factor ?? recommendation.limiting_factor ?? projection.limiting_factor ?? "",
+    ).trim();
+    const before = this._firstNumber(attributes, ["target_distance_before", "normalized_target_distance_before", "normalized_distance_before"])
+      ?? this._firstNumber(recommendation, ["target_distance_before", "normalized_target_distance_before"]);
+    const after = this._firstNumber(attributes, ["target_distance_after", "normalized_target_distance_after", "normalized_distance_after"])
+      ?? this._firstNumber(recommendation, ["target_distance_after", "normalized_target_distance_after"]);
+    return { action, duration, limiting, before, after };
+  }
+
+  _actionLabel(attributes, fallback) {
+    const recommendation = this._recommendation(attributes);
+    if (!recommendation.action) return fallback;
+    const minutes = recommendation.duration != null ? ` · ${Math.round(recommendation.duration)} min` : "";
+    return {
+      short_airing: `Stoßlüften${minutes}`,
+      ventilate: "Lüften empfohlen",
+      overnight: "Nachtlüften möglich",
+      avoid: "Nicht lüften",
+      optional: "Nicht erforderlich",
+    }[recommendation.action] || fallback;
   }
 
   _climateLabel(values) {
@@ -812,8 +868,15 @@ class NhzClimateVentilationCard extends HTMLElement {
   }
 
   _projectionSummary(attributes) {
-    const lines = [1, 8].map(hours => {
-      const projection = this._projection(attributes, hours);
+    const recommendation = this._recommendation(attributes);
+    const selectedMinutes = recommendation.duration != null ? Math.max(15, Math.round(recommendation.duration / 15) * 15) : null;
+    const selectedKey = selectedMinutes != null ? `${selectedMinutes}m` : null;
+    const overnight = recommendation.action === "overnight" || selectedMinutes >= 480;
+    const keys = overnight ? ["8h"] : (selectedKey ? [selectedKey, "8h"] : ["1h", "8h"]);
+    const lines = keys.map(key => {
+      const projection = key.endsWith("m")
+        ? this._projectionPeriod(attributes, key, key === "60m" ? 1 : null)
+        : this._projection(attributes, Number.parseInt(key, 10));
       if (!projection) return "";
       const values = [];
       if (projection.temperature != null) values.push(`❄️ ${this._formatClimate(projection.temperature)} °C`);
@@ -822,14 +885,15 @@ class NhzClimateVentilationCard extends HTMLElement {
       const theoretical = [];
       if (projection.theoreticalTemperature != null) theoretical.push(`Luftgrenze ${this._formatClimate(projection.theoreticalTemperature)} °C`);
       if (projection.theoreticalHumidity != null) theoretical.push(`Luftgrenze ${this._formatClimate(projection.theoreticalHumidity, 0)} %`);
+      const label = key.endsWith("m") ? `${key.slice(0, -1)} min` : `${key.slice(0, -1)} h`;
       const title = theoretical.length ? ` title="${this._escapeText(theoretical.join(" · "))}"` : "";
-      return `<span class="projection"${title}>${hours} h&nbsp; ${this._escapeText(values.join(" · "))}</span>`;
+      return `<span class="projection"${title}>${label}&nbsp; ${this._escapeText(values.join(" · "))}</span>`;
     }).filter(Boolean);
     return lines.length ? `<div class="projections">${lines.join("")}</div>` : "";
   }
 
-  _status(status) {
-    return {
+  _status(status, attributes = {}) {
+    const base = {
       ja: { icon: "🪟", label: "Lüften empfohlen", className: "yes" },
       nein: { icon: "⛔", label: "Nicht lüften", className: "no" },
       ambivalent: { icon: "⚖️", label: "Abwägen", className: "ambivalent" },
@@ -837,6 +901,17 @@ class NhzClimateVentilationCard extends HTMLElement {
       unavailable: { icon: "❔", label: "Daten nicht verfügbar", className: "unavailable" },
       unknown: { icon: "❔", label: "Daten nicht verfügbar", className: "unavailable" },
     }[String(status)] || { icon: "❔", label: String(status || "Daten nicht verfügbar"), className: "unavailable" };
+    const action = this._recommendation(attributes).action;
+    if (!action) return base;
+    const overrides = {
+      short_airing: { icon: "🪟", className: "yes" },
+      ventilate: { icon: "🪟", className: "yes" },
+      overnight: { icon: "🌙", className: "yes" },
+      avoid: { icon: "⛔", className: "no" },
+      optional: { icon: "🌿", className: "optional" },
+    };
+    const override = overrides[action];
+    return override ? { ...base, ...override, label: this._actionLabel(attributes, base.label) } : base;
   }
 
   _reasonCodes(attributes, prefix = "") {
@@ -867,7 +942,14 @@ class NhzClimateVentilationCard extends HTMLElement {
 
   _pending(attributes) {
     if (attributes.pending !== true || !attributes.candidate_status) return "";
-    const candidate = this._status(attributes.candidate_status);
+    const candidateAttributes = {
+      ...attributes,
+      // A pending candidate must not inherit the confirmed duration action.
+      recommended_action: attributes.candidate_recommended_action || "",
+      recommended_duration_minutes: attributes.candidate_recommended_duration_minutes,
+      ventilation_projection: {},
+    };
+    const candidate = this._status(attributes.candidate_status, candidateAttributes);
     const seconds = Number(attributes.candidate_remaining_seconds);
     const remaining = Number.isFinite(seconds) && seconds > 0
       ? ` · noch ${Math.max(1, Math.ceil(seconds / 60))} min`
@@ -888,14 +970,19 @@ class NhzClimateVentilationCard extends HTMLElement {
   _summary(rows) {
     if (!rows.length) return { icon: "❔", text: "Keine Lüftungszonen gefunden", detail: "", className: "unavailable" };
     const counts = rows.reduce((result, row) => {
-      const key = String(row.state.state);
+      const action = this._recommendation(row.state.attributes || {}).action;
+      const key = action || String(row.state.state);
       result[key] = (result[key] || 0) + 1;
       return result;
     }, {});
     const locked = rows.filter(row => row.state.attributes?.safety_lock_active === true).length;
     const unavailable = (counts.unavailable || 0) + (counts.unknown || 0);
     const distribution = [
+      counts.short_airing ? `${counts.short_airing} Stoßlüften` : "",
+      counts.overnight ? `${counts.overnight} Nachtlüften` : "",
+      counts.ventilate ? `${counts.ventilate} empfohlen` : "",
       counts.ja ? `${counts.ja} empfohlen` : "",
+      counts.avoid ? `${counts.avoid} nicht lüften` : "",
       counts.nein ? `${counts.nein} nicht empfohlen` : "",
       counts.ambivalent ? `${counts.ambivalent} abzuwägen` : "",
       counts.optional ? `${counts.optional} optional` : "",
@@ -905,12 +992,16 @@ class NhzClimateVentilationCard extends HTMLElement {
       icon: "🔒", text: `Aktive Sicherheitssperre in ${locked} ${locked === 1 ? "Raum" : "Räumen"}`,
       detail: distribution, className: "no",
     };
-    const represented = [counts.ja, counts.nein, counts.ambivalent, counts.optional, unavailable]
+    const represented = [counts.short_airing, counts.overnight, counts.ventilate, counts.avoid,
+      counts.ja, counts.nein, counts.ambivalent, counts.optional, unavailable]
       .filter(Boolean).length;
     if (represented > 1) return {
       icon: "↔️", text: "Räume unterschiedlich bewerten", detail: distribution, className: "ambivalent",
     };
-    if (counts.ja) return { icon: "🪟", text: "Lüften empfohlen", detail: distribution, className: "yes" };
+    if (counts.short_airing) return { icon: "🪟", text: "Stoßlüften", detail: distribution, className: "yes" };
+    if (counts.overnight) return { icon: "🌙", text: "Nachtlüften möglich", detail: distribution, className: "yes" };
+    if (counts.ventilate || counts.ja) return { icon: "🪟", text: "Lüften empfohlen", detail: distribution, className: "yes" };
+    if (counts.avoid) return { icon: "⛔", text: "Nicht lüften", detail: distribution, className: "no" };
     if (counts.ambivalent) return { icon: "⚖️", text: "Lüften je nach Ziel abwägen", detail: distribution, className: "ambivalent" };
     if (counts.nein) return { icon: "⛔", text: "Lüften derzeit nicht empfohlen", detail: distribution, className: "no" };
     if (counts.optional) return { icon: "🌿", text: "Lüften nicht erforderlich, aber unschädlich", detail: distribution, className: "optional" };
@@ -936,11 +1027,17 @@ class NhzClimateVentilationCard extends HTMLElement {
     const summary = this._summary(rows);
     const body = rows.map(row => {
       const attributes = row.state.attributes || {};
-      const status = this._status(row.state.state);
+      const status = this._status(row.state.state, attributes);
       const effects = this._effectText(attributes);
+      const recommendation = this._recommendation(attributes);
+      const detail = [];
+      if (recommendation.before != null && recommendation.after != null) {
+        detail.push(`Zielabstand ${recommendation.before.toFixed(2)} → ${recommendation.after.toFixed(2)}`);
+      }
+      if (recommendation.limiting) detail.push(`Begrenzung: ${recommendation.limiting}`);
       return `<button class="zone ${status.className}" data-entity-id="${this._escapeText(row.entityId)}" type="button">
         <span class="zone-icon">${status.icon}</span>
-        <span class="zone-content"><span class="zone-heading"><strong>${this._escapeText(this._zoneName(row))}</strong><span>${this._escapeText(status.label)}</span></span>
+        <span class="zone-content"><span class="zone-heading"><strong>${this._escapeText(this._zoneName(row))}</strong><span${detail.length ? ` title="${this._escapeText(detail.join(" · "))}"` : ""}>${this._escapeText(status.label)}</span></span>
         ${this._climateSummary(attributes)}
         ${this._projectionSummary(attributes)}
         ${this._safety(attributes)}
@@ -981,7 +1078,7 @@ if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.10.0",
+    version: "0.11.0",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
@@ -989,6 +1086,6 @@ if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card
     type: "nhz-climate-ventilation-card",
     name: "NHZ Climate Ventilation Card",
     description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
-    version: "0.10.0",
+    version: "0.11.0",
   });
 }
