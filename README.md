@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.11.0**.
+Current feature version: **0.12.0**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -38,6 +38,12 @@ graphs:
 `cumulative` uses the same cumulative curve for all non-today ranges, while `general` uses the normal variable chart. Snow can use either cumulative mode without a special variable name. For every cumulative mode, **Heute** deliberately displays a note: seven days are the smallest meaningful comparison window. The `rain` actual can combine a configured local gauge, ERA5, and archived ICON hour by hour. For all-phase `precipitation`, the integration replaces only the modelled liquid component with that gauge and retains the modelled solid-water equivalent. Incomplete coverage is marked, not silently interpreted as zero.
 
 `precipitation_view` remains a compatibility alias for existing dashboards, but new configurations should use `display_mode`.
+
+For the day view, the card renders forecast precipitation as hourly bars and
+the locally observed/model-fallback history as a line. It keeps the newest
+forecast visible for elapsed hours so model quality can be inspected without
+freezing old runs. Six-hour probability labels mean the probability of at
+least 0.5 mm precipitation in the corresponding block.
 
 ## Ventilation card
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0
+
+- Add an hourly precipitation day view with forecast amounts as bars, actuals
+  as a line, a now marker and six-hour probabilities for at least 0.5 mm.
+- Keep the newest forecast overlay for elapsed hours to make model quality
+  directly visible without persisting frozen chart runs.
+- Improve the exploratory data viewer with session/local token storage,
+  multiple selectable series, labelled axes, accessible point values and
+  automatic mode adjustments.
+
 ## 0.11.0
 
 - Render duration-aware ventilation actions such as `Stoßlüften · 30 min`
