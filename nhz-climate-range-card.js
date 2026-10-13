@@ -136,6 +136,47 @@ class NhzPrecipitationChart extends HTMLElement {
     </svg>`;
   }
 
+  _todayForecastChart(graph, profile, now) {
+    const attributes = profile.attributes || {};
+    const points = (attributes.hourly_forecast || []).map(point => ({
+      time: this._time(point.datetime), value: this._number(point.precipitation),
+    })).filter(point => point.time != null && point.value != null);
+    const actualPayload = attributes.local_hourly_actual || {};
+    const actual = (actualPayload.hourly || []).map(point => ({
+      time: this._time(point.start), value: this._number(point.value),
+    })).filter(point => point.time != null && point.value != null);
+    const timeZone = attributes.site_timezone || attributes.timezone || graph.site_timezone || "UTC";
+    const start = this._localTime(this._localDateKey(now, timeZone), timeZone, 0);
+    const end = this._localTime(this._shiftDate(this._localDateKey(now, timeZone), 1), timeZone, 0);
+    const width = 760, height = 300, left = 48, right = 18, top = 18, bottom = 38;
+    const innerWidth = width - left - right, innerHeight = height - top - bottom;
+    const max = Math.max(1, ...points.map(point => point.value), ...actual.map(point => point.value)) * 1.2;
+    const x = value => left + ((value - start.getTime()) / Math.max(1, end.getTime() - start.getTime())) * innerWidth;
+    const y = value => top + innerHeight - (value / max) * innerHeight;
+    const grid = [0, .25, .5, .75, 1].map(fraction => {
+      const value = max * fraction;
+      return `<line x1="${left}" y1="${y(value)}" x2="${width-right}" y2="${y(value)}" class="grid"/><text x="${width-right-3}" y="${y(value)-5}" text-anchor="end" class="axis">${value.toFixed(1)} mm</text>`;
+    }).join("");
+    const barWidth = Math.max(3, innerWidth / 25);
+    const bars = points.filter(point => point.time >= start.getTime() && point.time < end.getTime()).map(point =>
+      `<rect x="${x(point.time) - barWidth / 2}" y="${y(point.value)}" width="${barWidth}" height="${Math.max(1, y(0) - y(point.value))}" class="forecast-bar"><title>${new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}: ${point.value.toFixed(1)} mm</title></rect>`
+    ).join("");
+    const actualPoints = actual.filter(point => point.time >= start.getTime() && point.time <= end.getTime());
+    const actualPath = this._path(actualPoints.map(point => [point.time, point.value]), x, y);
+    const probabilities = (attributes.forecast_probability_6h || []).filter(point => {
+      const blockStart = this._time(point.block_start);
+      return point.probability != null && blockStart != null
+        && blockStart >= start.getTime() && blockStart < end.getTime();
+    }).map(point => {
+      const label = `${Math.round(Number(point.probability) * 100)} %`;
+      return `<text x="${x(this._time(point.block_start))}" y="${height - 12}" class="probability" text-anchor="middle"><title>${this._escapeText(point.local_start_hour + "–" + ((point.local_start_hour + 6) % 24) + " Uhr, Ereignis ≥ 0,5 mm")}</title>${label}</text>`;
+    }).join("");
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Niederschlag heute: Prognose als Stundenbalken, IST als Linie">
+      ${grid}${bars}<path d="${actualPath}" class="actual"/><line x1="${x(now.getTime())}" y1="${top}" x2="${x(now.getTime())}" y2="${height-bottom}" class="now"/>${probabilities}
+      <text x="${left}" y="${height-10}" class="date">00 Uhr</text><text x="${width-right}" y="${height-10}" text-anchor="end" class="date">24 Uhr</text>
+    </svg>`;
+  }
+
   _monthlyData(profile, graph) {
     const entityId = graph.monthly_comparison_entity || graph.monthly_entity;
     const monthlyEntity = entityId && this._hass.states[entityId];
@@ -360,8 +401,8 @@ class NhzPrecipitationChart extends HTMLElement {
       .totals{display:flex;justify-content:space-between;gap:18px;margin:4px 4% 2px}.totals div{display:flex;flex-direction:column}.totals div:last-child{text-align:right}.totals strong{font-size:30px}.totals span{color:var(--secondary-text-color);font-size:13px}
       svg{width:100%;display:block;overflow:visible}.grid{stroke:var(--divider-color);stroke-width:1}.axis,.date,.month{fill:var(--secondary-text-color);font-size:12px;font-weight:600}
       .actual{fill:none;stroke:#25C7F4;stroke-width:6;stroke-linejoin:round;stroke-linecap:round}.expected{fill:none;stroke:#8D93A6;stroke-width:5;stroke-dasharray:12 10;stroke-linecap:round}.expected-band{fill:rgba(128,203,196,.28);stroke:none}
-      .actual-dot{fill:#25C7F4;stroke:var(--card-background-color);stroke-width:3}.expected-dot{fill:#8D93A6;stroke:var(--card-background-color);stroke-width:3}
-      .legend{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;color:var(--secondary-text-color);font-size:14px}.legend span,.monthly-legend span{display:flex;align-items:center;gap:8px}.legend i,.monthly-legend i{width:12px;height:12px;border-radius:50%}.actual-key{background:#25C7F4}.expected-key{background:#8D93A6}
+      .actual-dot{fill:#25C7F4;stroke:var(--card-background-color);stroke-width:3}.expected-dot{fill:#8D93A6;stroke:var(--card-background-color);stroke-width:3}.forecast-bar{fill:#25C7F4;opacity:.78}.now{stroke:#00A6D6;stroke-width:2;stroke-dasharray:5 4}.probability{fill:var(--secondary-text-color);font-size:11px}
+      .legend{display:flex;gap:24px;justify-content:center;flex-wrap:wrap;color:var(--secondary-text-color);font-size:14px}.legend span,.monthly-legend span{display:flex;align-items:center;gap:8px}.legend i,.monthly-legend i{width:12px;height:12px;border-radius:50%}.actual-key{background:#25C7F4}.expected-key{background:#8D93A6}.forecast-key{background:#25C7F4;border-radius:2px!important}
       .monthly h2{margin-bottom:10px}.monthly-legend{display:flex;gap:18px;flex-wrap:wrap;color:var(--secondary-text-color);font-size:13px;margin:0 0 7px}.band-key{background:#80CBC4;border-radius:3px!important;width:18px!important}.mean-key{background:#fff;border:1px solid #52606D}.month-list{display:grid;gap:13px}.month-row{display:grid;gap:5px}.month-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0}.month-name{font-weight:650;text-transform:capitalize;min-width:0}.month-name small,.month-flags,.provenance,.rolling small{color:var(--secondary-text-color);font-size:12px;font-weight:400}.month-flags{text-align:right}.scale{display:flex;justify-content:space-between;gap:12px;color:var(--secondary-text-color);font-size:11px;margin-bottom:4px}.track{height:14px;position:relative;background:rgba(82,126,151,.20);border:1px solid rgba(128,203,196,.25);border-radius:8px}.track .band{position:absolute;top:1px;height:10px;border-radius:7px;background:linear-gradient(90deg,#548a94,#80CBC4)}.track .mean{position:absolute;top:-3px;width:3px;height:20px;background:#fff;box-shadow:0 0 0 1px #52606D;border-radius:2px;transform:translateX(-50%)}.track .actual{position:absolute;top:-3px;width:18px;height:18px;border-radius:50%;background:#25C7F4;border:3px solid var(--card-background-color);transform:translateX(-50%)}.track .actual.off-band{background:#FFB300;box-shadow:0 0 0 2px #7A4A00}.rolling{display:grid;grid-template-columns:1fr auto;gap:0 12px;align-items:baseline;border:1px solid var(--divider-color);border-radius:9px;padding:9px 11px;margin-bottom:12px}.rolling strong{font-size:20px}.rolling small{grid-column:1 / -1}.provenance{margin-top:14px}
       @media(max-width:600px){.difference{font-size:23px}.totals strong{font-size:25px}.content{padding:16px 12px}.axis{font-size:11px}.month-header{align-items:flex-start;flex-direction:column;gap:1px}.month-flags{text-align:left}.monthly-legend{gap:10px}}`;
   }
@@ -381,6 +422,11 @@ class NhzPrecipitationChart extends HTMLElement {
     // and a plain cumulative 365-day curve, remain directly comparable.
     if (this._config.monthly_rows) {
       this._monthlyView(graph, profile, now);
+      return;
+    }
+    if (this._config.forecast_today) {
+      this._activeUnit = "mm";
+      this._renderForecastToday(graph, profile, now);
       return;
     }
     const preliminaryComparison = this._monthlyData(profile, graph);
@@ -436,6 +482,13 @@ class NhzPrecipitationChart extends HTMLElement {
     } catch (error) {
       this._renderMessage(`Niederschlagsstatistik konnte nicht geladen werden: ${error.message}`);
     }
+  }
+
+  _renderForecastToday(graph, profile, now) {
+    const attributes = profile.attributes || {};
+    const stale = attributes.forecast_stale || attributes.forecast_availability === "unavailable";
+    const model = attributes.forecast_model ? ` · ${attributes.forecast_model}` : "";
+    this.shadowRoot.innerHTML = `<ha-card><div class="content"><h2>${this._escapeText(graph.title)} – ${this._escapeText(graph.explanation)}</h2><div class="subtitle">Stundenprognose${this._escapeText(model)}${stale ? " · Prognose veraltet" : ""}</div>${this._todayForecastChart(graph, profile, now)}<div class="legend"><span><i class="forecast-key"></i>Forecast-Stundenmenge</span><span><i class="actual-key"></i>IST</span><span>Wahrscheinlichkeit: Ereignis ≥ 0,5 mm je 6 h</span></div></div></ha-card><style>${this._styles()}</style>`;
   }
 
   _render(graph, actual, expected, chart, hasBand = false) {
@@ -571,6 +624,9 @@ class NhzClimateRangeCard extends HTMLElement {
 
   _chart(graph) {
     const mode = this._displayMode(graph);
+    if (mode !== "general" && this._range === "today" && graph.forecast) {
+      return { type: "custom:nhz-precipitation-chart", graph, range: this._range, forecast_today: true };
+    }
     if (mode !== "general" && this._range === "today") {
       return {
         type: "markdown",
