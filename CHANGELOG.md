@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.13.0
+## 0.13.1
 
-- Add a dimensionally separate six-hour ICON/IFS precipitation comparison
+- Add a dimensionally separate 0–72-hour ICON/IFS precipitation comparison
   with IFS P10/P50/P90 and event probability in point details.
 - Add compact absolute 24/48-hour planning summaries without blending them
   into the hourly precipitation chart.

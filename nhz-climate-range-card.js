@@ -186,10 +186,12 @@ class NhzPrecipitationChart extends HTMLElement {
       const label = `${Math.round(Number(point.probability) * 100)} %`;
       return `<text x="${x(this._time(point.block_start))}" y="${height - 12}" class="probability" text-anchor="middle"><title>${this._escapeText(point.local_start_hour + "–" + ((point.local_start_hour + 6) % 24) + " Uhr, Ereignis ≥ 0,5 mm")}</title>${label}</text>`;
     }).join("");
+    const comparisonStart = comparisons.length ? new Date(Math.min(...comparisons.flatMap(item => item.points.map(point => point.time)))) : start;
+    const comparisonEnd = comparisons.length ? new Date(Math.max(...comparisons.flatMap(item => item.points.map(point => point.end)))) : end;
     return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Niederschlag heute: Prognose als Stundenbalken, IST als Linie">
       ${grid}${bars}<path d="${actualPath}" class="actual"/><line x1="${x(now.getTime())}" y1="${top}" x2="${x(now.getTime())}" y2="${height-bottom}" class="now"/>${probabilities}
       <text x="${left}" y="${height-10}" class="date">00 Uhr</text><text x="${width-right}" y="${height-10}" text-anchor="end" class="date">24 Uhr</text>
-    </svg>${this._comparisonChart(comparisons, start, end)}`;
+    </svg>${this._comparisonChart(comparisons, comparisonStart, comparisonEnd)}`;
   }
 
   _comparisonChart(comparisons, start, end) {
@@ -214,7 +216,8 @@ class NhzPrecipitationChart extends HTMLElement {
       return `<rect x="${center - barWidth / 2}" y="${y(point.value)}" width="${barWidth}" height="${Math.max(1, y(0) - y(point.value))}" fill="${item.color}" class="comparison-bar"><title>${this._escapeText(item.label)}: ${point.value.toFixed(1)} mm, 6 h${spread}${probability}</title></rect>`;
     })).join("");
     const labels = items.map(item => `<span><i class="comparison-key" style="background:${item.color}"></i>${this._escapeText(item.label)}</span>`).join("");
-    return `<div class="comparison-panel"><div class="comparison-title">6‑Stunden-Modellvergleich · Intervallsumme</div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Sechs-Stunden-Niederschlagsvergleich">${grid}${bars}<text x="${left}" y="${height-8}" class="date">00 Uhr</text><text x="${width-right}" y="${height-8}" text-anchor="end" class="date">24 Uhr</text></svg><div class="comparison-legend">${labels}</div></div>`;
+    const label = value => new Intl.DateTimeFormat("de-DE", { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(value);
+    return `<div class="comparison-panel"><div class="comparison-title">6‑Stunden-Modellvergleich · 0–72 h · Intervallsumme</div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Sechs-Stunden-Niederschlagsvergleich">${grid}${bars}<text x="${left}" y="${height-8}" class="date">${label(start)}</text><text x="${width-right}" y="${height-8}" text-anchor="end" class="date">${label(end)}</text></svg><div class="comparison-legend">${labels}</div></div>`;
   }
 
   _comparisonForecasts(attributes) {
@@ -1227,7 +1230,7 @@ if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.13.0",
+    version: "0.13.1",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
@@ -1235,6 +1238,6 @@ if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card
     type: "nhz-climate-ventilation-card",
     name: "NHZ Climate Ventilation Card",
     description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
-    version: "0.13.0",
+    version: "0.13.1",
   });
 }
