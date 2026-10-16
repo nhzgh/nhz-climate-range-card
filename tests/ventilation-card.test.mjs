@@ -18,6 +18,25 @@ const context = vm.createContext({
 });
 vm.runInContext(source, context);
 const Card = registry["nhz-climate-ventilation-card"];
+const PrecipitationCard = registry["nhz-precipitation-chart"];
+
+test("keeps optional IFS comparison and planning data separate", () => {
+  const card = new PrecipitationCard();
+  const comparisons = card._comparisonForecasts({
+    forecast_comparisons: [{ model: "ifs_eps", horizon: "0–72 h", points: [
+      { valid_at: "2026-10-16T12:00:00Z", precipitation: 1.2 },
+    ] }],
+  });
+  assert.equal(comparisons.length, 1);
+  assert.match(comparisons[0].label, /ifs_eps/);
+  assert.match(card._planningSummary({
+    forecast_planning: { ifs_eps: { windows: [{ hours: 24, p10_mm: 0, p50_mm: 1, p90_mm: 4, dry_probability: 0.75 }] } },
+  }), /24 h: P10–P90 0\.0–4\.0 mm · trocken 75 %/);
+  const panel = card._comparisonChart(comparisons, new Date("2026-10-16T00:00:00Z"), new Date("2026-10-17T00:00:00Z"));
+  assert.match(panel, /6‑Stunden-Modellvergleich/);
+  assert.match(panel, /comparison-bar/);
+  assert.doesNotMatch(panel, /class="comparison"/);
+});
 
 test("renders compact climate values and projections", () => {
   const card = new Card();

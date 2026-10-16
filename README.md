@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.12.0**.
+Current feature version: **0.13.0**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -44,6 +44,14 @@ the locally observed/model-fallback history as a line. It keeps the newest
 forecast visible for elapsed hours so model quality can be inspected without
 freezing old runs. Six-hour probability labels mean the probability of at
 least 0.5 mm precipitation in the corresponding block.
+
+When the profile entity exposes the additive `forecast_comparisons` attribute,
+an IFS 0–72-hour precipitation comparison is rendered in a separate compact
+six-hour interval-sum panel. It is never merged into the hourly ICON/IST
+chart, and it is not rendered as a temperature series. An optional
+`forecast_planning` attribute adds compact absolute P10–P90/P50 and
+dry-probability values for 24 and 48 hours. No climatological anomaly or
+category is inferred by the card.
 
 ## Ventilation card
 
