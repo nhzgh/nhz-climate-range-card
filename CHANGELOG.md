@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0
+
+- Add `custom:nhz-climate-dry-window-card` for the dedicated bounded
+  dry-window planning entity.
+- Keep IFS-EPS rolling planning windows and EC46-EPS long-range tendency
+  visibly separate; compare them only for identical validity intervals.
+- Explain dry probability, precipitation P10/P50/P90, model provenance,
+  coverage, stale snapshots and unavailable planning data explicitly.
+- Read the lossless columnar v2 integration contract, keep the rendered DOM
+  bounded, and derive lead days without mislabelling snapshot time as a model run.
+
 ## 0.13.1
 
 - Add a dimensionally separate 0–72-hour ICON/IFS precipitation comparison

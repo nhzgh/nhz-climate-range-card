@@ -2,7 +2,7 @@
 
 Home Assistant dashboard card distributed through a public GitHub repository. Install it as a HACS custom Dashboard repository; it is not listed in the HACS default catalog. The card contains no hostnames, tokens, or site credentials.
 
-Current feature version: **0.13.1**.
+Current feature version: **0.14.0**.
 
 ![Rolling precipitation comparison with monthly P10–P90 ranges, historical means, and local actuals](docs/precipitation-year.png)
 
@@ -38,6 +38,42 @@ graphs:
 `cumulative` uses the same cumulative curve for all non-today ranges, while `general` uses the normal variable chart. Snow can use either cumulative mode without a special variable name. For every cumulative mode, **Heute** deliberately displays a note: seven days are the smallest meaningful comparison window. The `rain` actual can combine a configured local gauge, ERA5, and archived ICON hour by hour. For all-phase `precipitation`, the integration replaces only the modelled liquid component with that gauge and retains the modelled solid-water equivalent. Incomplete coverage is marked, not silently interpreted as zero.
 
 `precipitation_view` remains a compatibility alias for existing dashboards, but new configurations should use `display_mode`.
+
+## Dry-window card
+
+`custom:nhz-climate-dry-window-card` presents the dedicated NHZ Climate
+dry-window planning entity. Its probability is an ensemble probability for
+the stated absolute window: a higher percentage means **drier**. P50 and
+P10–P90 remain precipitation amounts in millimetres; they are never converted
+to a probability.
+
+```yaml
+type: custom:nhz-climate-dry-window-card
+entity: sensor.example_dry_window_planning
+title: Ernte- und Trockenfenster
+default_window: 24
+```
+
+`entity` is required; `title` and `default_window` (24 or 48) are optional.
+Clicking the heading opens the normal Home Assistant more-info dialog. The
+card uses every supplied rolling window, but bounds the view: the next seven
+available local start dates show the driest real start window per model/day, explicitly
+labelled as a selection from the rolling starts. The hero names the best real
+IFS window among those next seven start dates; it does not rank IFS against
+the longer EC46 horizon. Incomplete coverage or stale upstream snapshots
+are marked instead of being treated as dry weather.
+
+IFS-EPS and EC46-EPS stay in separate sections. EC46 days 16–46 are a compact
+weekly orientation: each block states the median and range of its rolling
+window probabilities, not a fabricated weekly probability. The optional
+day-10–15 comparison appears only where IFS and EC46 share exactly the same
+validity interval; it reports separate model medians and their deviation. The
+card neither time-shifts nor silently blends them. A provider run timestamp is
+used as lead-zero only when the source certifies one; the present snapshot is
+labelled as retrieval time, while nominal day-3/day-10 starts supply the
+documented fallback origin.
+Unavailable entities, missing window durations, and partial coverage have
+explicit human-readable states.
 
 For the day view, the card renders forecast precipitation as hourly bars and
 the locally observed/model-fallback history as a line. It keeps the newest

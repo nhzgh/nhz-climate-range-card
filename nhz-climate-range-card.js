@@ -1221,16 +1221,367 @@ class NhzClimateVentilationCard extends HTMLElement {
   }
 }
 
+class NhzClimateDryWindowCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+  }
+
+  setConfig(config) {
+    if (!config?.entity || typeof config.entity !== "string") {
+      throw new Error("nhz-climate-dry-window-card requires an entity");
+    }
+    if (config.default_window != null && ![24, 48].includes(Number(config.default_window))) {
+      throw new Error("nhz-climate-dry-window-card default_window must be 24 or 48");
+    }
+    this._config = config;
+    this._selectedHours = [24, 48].includes(this._selectedHours)
+      ? this._selectedHours : (Number(config.default_window) === 48 ? 48 : 24);
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() { return 9; }
+
+  _escapeText(value) {
+    return String(value ?? "").replace(/[&<>"']/g, character => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+    })[character]);
+  }
+
+  _number(value) {
+    if (value == null || value === "" || typeof value === "boolean") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  _time(value) {
+    if (value == null || value === "") return null;
+    if (typeof value === "number") return value < 100000000000 ? value * 1000 : value;
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  _coverage(value) {
+    const parsed = this._number(value);
+    if (parsed == null) return null;
+    return Math.max(0, Math.min(1, parsed > 1 ? parsed / 100 : parsed));
+  }
+
+  _modelLabel(model) {
+    const value = String(model || "").toLowerCase();
+    if (value.includes("ifs")) return "IFS-EPS";
+    if (value.includes("ec46")) return "EC46-EPS";
+    return String(model || "Planungsmodell");
+  }
+
+  _columnSeriesWindows(payload) {
+    // v2 keeps every rolling window losslessly in aligned columns.  Expand it
+    // at the card boundary so all later rendering uses the same absolute
+    // window model as legacy `windows`/`h,s,e,d,c,l,m,q` payloads.
+    const series = payload?.series;
+    if (!series || typeof series !== "object") return [];
+    const entries = Array.isArray(series)
+      ? series.map(item => [item?.window_hours ?? item?.h ?? item?.hours, item])
+      : Object.entries(series);
+    return entries.flatMap(([key, column]) => {
+      if (!column || typeof column !== "object") return [];
+      const hours = this._number(column.window_hours ?? column.h ?? column.hours ?? String(key).replace(/h$/i, ""));
+      const base = this._time(column.base ?? column.start ?? column.s);
+      const offsets = Array.isArray(column.offset_hours) ? column.offset_hours : [];
+      const probabilities = Array.isArray(column.dry_probability) ? column.dry_probability : [];
+      if (![24, 48].includes(hours) || base == null || !offsets.length || offsets.length !== probabilities.length) return [];
+      const columns = {
+        coverage: Array.isArray(column.coverage_ratio) ? column.coverage_ratio : [],
+        p10: Array.isArray(column.p10_mm) ? column.p10_mm : [],
+        p50: Array.isArray(column.p50_mm) ? column.p50_mm : [],
+        p90: Array.isArray(column.p90_mm) ? column.p90_mm : [],
+      };
+      return offsets.map((offset, index) => {
+        const offsetHours = this._number(offset);
+        const dry = this._number(probabilities[index]);
+        if (offsetHours == null || dry == null) return null;
+        const start = base + offsetHours * 3600000;
+        return {
+          valid_from: new Date(start).toISOString(), valid_to: new Date(start + hours * 3600000).toISOString(),
+          window_hours: hours, dry_probability: dry,
+          coverage_ratio: columns.coverage[index], p10_mm: columns.p10[index],
+          p50_mm: columns.p50[index], p90_mm: columns.p90[index],
+        };
+      }).filter(Boolean);
+    });
+  }
+
+  _planningModels(attributes) {
+    // The dedicated HA planning entity publishes `planning_models`.  The
+    // profile-entity aliases retain compatibility with the additive forecast
+    // contract used by older dashboards.
+    const raw = attributes?.planning_models ?? attributes?.forecast_planning ?? attributes?.planning_forecast ?? attributes?.planning;
+    if (!raw || typeof raw !== "object") return [];
+    const entries = Array.isArray(raw)
+      ? raw.map(item => [item?.model_key || item?.model || item?.provider_model, item])
+      : Array.isArray(raw.models) ? raw.models.map(item => [item?.model_key || item?.model || item?.provider_model, item])
+        : Object.entries(raw).filter(([, value]) => value && typeof value === "object");
+    return entries.map(([key, payload]) => {
+      const modelKey = payload.model_key || payload.model || payload.provider_model || key;
+      const candidates = [
+        ...this._columnSeriesWindows(payload),
+        ...(Array.isArray(payload.windows) ? payload.windows : []),
+        ...(Array.isArray(payload.rolling_windows) ? payload.rolling_windows : []),
+        ...(Array.isArray(payload.dry_windows) ? payload.dry_windows : []),
+        ...(payload.next_24h ? [payload.next_24h] : []),
+        ...(payload.next_48h ? [payload.next_48h] : []),
+      ];
+      const windows = candidates.map(window => {
+        const start = this._time(window.valid_from ?? window.start ?? window.range_start_utc ?? window.s);
+        const end = this._time(window.valid_to ?? window.end ?? window.range_end_utc ?? window.e);
+        const inferredHours = start != null && end != null ? Math.round((end - start) / 3600000) : null;
+        const hours = this._number(window.window_hours ?? window.horizon_hours ?? window.hours ?? window.h) ?? inferredHours;
+        const dry = this._number(window.dry_probability ?? window.dry_window_probability ?? window.probability_dry ?? window.probability ?? window.d);
+        return {
+          ...window, start, end, hours, dry: dry == null ? null : Math.max(0, Math.min(1, dry > 1 ? dry / 100 : dry)),
+          p10: this._number(window.p10_mm ?? window.p10 ?? window.l),
+          p50: this._number(window.p50_mm ?? window.p50 ?? window.median_mm ?? window.m),
+          p90: this._number(window.p90_mm ?? window.p90 ?? window.q),
+          coverage: this._coverage(window.coverage_ratio ?? window.coverage ?? window.c),
+          snapshot: this._time(window.snapshot_at ?? payload.snapshot_at ?? payload.first_seen_at),
+          stale: window.stale === true || payload.stale === true,
+          cadence: this._number(window.native_cadence_hours ?? payload.native_cadence_hours ?? payload.cadence_hours),
+        };
+      }).filter(window => window.start != null && window.end != null && window.hours != null);
+      return {
+        key: String(modelKey), label: this._modelLabel(modelKey), provider: payload.provider_model || payload.provider || "",
+        snapshot: this._time(payload.snapshot_at ?? payload.first_seen_at), stale: payload.stale === true,
+        // A snapshot is only an API observation time. It must not be relabelled
+        // as a provider model initialization/reference time.
+        reference: this._time(payload.run_reference_time ?? payload.model_run_at),
+        cadence: this._number(payload.native_cadence_hours ?? payload.cadence_hours), windows,
+      };
+    }).filter(model => model.windows.length);
+  }
+
+  _windows(models, hours) {
+    return models.map(model => ({ ...model, windows: model.windows
+      .filter(window => window.hours === hours)
+      .sort((left, right) => left.start - right.start) })).filter(model => model.windows.length);
+  }
+
+  _formatDate(time, timeZone) {
+    return new Intl.DateTimeFormat("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone }).format(time);
+  }
+
+  _formatWindow(window, timeZone) {
+    return `${this._formatDate(window.start, timeZone)} – ${new Intl.DateTimeFormat("de-DE", { weekday: "short", hour: "2-digit", minute: "2-digit", timeZone }).format(window.end)}`;
+  }
+
+  _formatMm(value) { return value == null ? "–" : `${value.toFixed(1).replace(".", ",")} mm`; }
+
+  _dryClass(probability) {
+    // Forecast probabilities have no calibrated agricultural category here.
+    // Colour therefore encodes the selected series only, never “good/bad”.
+    return probability == null ? "unknown" : "probability";
+  }
+
+  _dryLabel(probability) {
+    return probability == null ? "keine Trockenwahrscheinlichkeit" : "höher = trockener";
+  }
+
+  _coverageText(window) {
+    if (window.coverage == null || window.coverage >= .999) return "";
+    return `Abdeckung ${(window.coverage * 100).toFixed(0)} %`;
+  }
+
+  _dateKey(time, timeZone) {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
+      .formatToParts(time).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
+
+  _median(values) {
+    const sorted = values.filter(value => value != null).sort((left, right) => left - right);
+    if (!sorted.length) return null;
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  _primaryModel(models) {
+    return models.find(model => model.key.toLowerCase().includes("ifs")) || models[0] || null;
+  }
+
+  _heroBest(models, timeZone) {
+    const model = this._primaryModel(models);
+    if (!model) return null;
+    const days = [...new Set(model.windows.map(window => this._dateKey(window.start, timeZone)))].slice(0, 7);
+    const window = model.windows.filter(item => days.includes(this._dateKey(item.start, timeZone)) && item.dry != null)
+      .reduce((winner, item) => !winner || item.dry > winner.dry ? item : winner, null);
+    return window ? { model, window, days } : null;
+  }
+
+  _nearFuture(models, timeZone) {
+    // Seven *local* start dates bound the DOM even when a provider emits a
+    // rolling window every six hours.  The displayed item is the driest real
+    // start window for that model/date, never a daily average.
+    const primary = this._primaryModel(models);
+    if (!primary) return [];
+    const dateKeys = [...new Set(primary.windows.map(window => this._dateKey(window.start, timeZone)))].slice(0, 7);
+    const namedModels = models.filter(model => /ifs|ec46/i.test(model.key));
+    const visibleModels = (namedModels.length ? namedModels : models).slice(0, 2);
+    return dateKeys.map(key => ({
+      key,
+      rows: visibleModels.map(model => {
+        const candidates = model.windows.filter(window => this._dateKey(window.start, timeZone) === key && window.dry != null);
+        const selected = candidates.reduce((winner, window) => !winner || window.dry > winner.dry ? window : winner, null);
+        return selected ? { model, window: selected, candidates: candidates.length } : null;
+      }).filter(Boolean),
+    })).filter(day => day.rows.length);
+  }
+
+  _nearWindow(row, timeZone) {
+    const { model, window, candidates } = row;
+    const range = window.p10 != null || window.p90 != null
+      ? `P10–P90 ${this._formatMm(window.p10)}–${this._formatMm(window.p90)}` : "P10–P90 –";
+    const detail = [`Start ${new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit", timeZone }).format(window.start)}`, `P50 ${this._formatMm(window.p50)}`, range, this._coverageText(window)].filter(Boolean).join(" · ");
+    return `<div class="model-line ${this._dryClass(window.dry)}"><strong>${this._escapeText(model.label)}</strong><span>${Math.round(window.dry * 100)} %</span><i aria-hidden="true"><b style="width:${Math.round(window.dry * 100)}%"></b></i><small title="${this._escapeText(detail)}">${this._escapeText(detail)}${candidates > 1 ? ` · Auswahl aus ${candidates} Starts` : ""}</small></div>`;
+  }
+
+  _nearFutureSection(models, hours, timeZone) {
+    const days = this._nearFuture(models, timeZone);
+    if (!days.length) return "";
+    const namedModels = models.filter(model => /ifs|ec46/i.test(model.key));
+    const provenance = (namedModels.length ? namedModels : models).slice(0, 2).map(model => [model.label, model.provider, model.snapshot ? `Snapshot ${this._formatDate(model.snapshot, timeZone)}` : ""].filter(Boolean).join(" · ")).join(" / ");
+    return `<section class="model near"><div class="section-head"><div><h3>Nächste sieben verfügbare Starttage</h3><small>Je Modell und lokalem Starttag: trockenstes reales ${hours}-h-Fenster aus den rollierenden Starts.</small></div><small>${this._escapeText(provenance)}</small></div><div class="days">${days.map(day => `<article class="day"><strong>${this._escapeText(new Intl.DateTimeFormat("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", timeZone }).format(new Date(`${day.key}T12:00:00Z`)))}</strong>${day.rows.map(row => this._nearWindow(row, timeZone)).join("")}</article>`).join("")}</div></section>`;
+  }
+
+  _origin(models) {
+    // Only a certified provider run/reference timestamp is an exact lead-zero.
+    // The planning source currently exposes snapshot_at merely as first-seen
+    // time. Without an exact run timestamp, derive the documented nominal
+    // origin from IFS day 3 or EC46 day 10 instead of mislabelling first-seen.
+    const primary = this._primaryModel(models);
+    if (primary?.reference != null) return primary.reference;
+    const first = primary?.windows[0]?.start;
+    if (first != null && /ifs/i.test(primary.key)) return first - 3 * 86400000;
+    if (first != null && /ec46/i.test(primary.key)) return first - 10 * 86400000;
+    return first ?? Math.min(...models.flatMap(model => model.windows.map(window => window.start)));
+  }
+
+  _overlap(models, hours, timeZone) {
+    const ifs = models.find(model => model.key.toLowerCase().includes("ifs"));
+    const ec46 = models.find(model => model.key.toLowerCase().includes("ec46"));
+    if (!ifs || !ec46) return "";
+    const origin = this._origin(models);
+    const ec46ByRange = new Map(ec46.windows.map(window => [`${window.start}:${window.end}`, window]));
+    const pairs = ifs.windows.map(window => [window, ec46ByRange.get(`${window.start}:${window.end}`)])
+      .filter(([, other]) => other && (other.dry != null))
+      .filter(([window]) => window.dry != null && Math.floor((window.start - origin) / 86400000) >= 10 && Math.floor((window.start - origin) / 86400000) < 16);
+    if (!pairs.length) return `<section class="overlap"><h3>IFS/EC46 · Tag 10–15</h3><p>Keine exakt deckungsgleichen ${hours}-h-Fenster. Werte werden nicht zeitlich verschoben oder gemischt.</p></section>`;
+    const grouped = new Map();
+    for (const [left, right] of pairs) {
+      const key = this._dateKey(left.start, timeZone);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push([left, right]);
+    }
+    const rows = [...grouped.entries()].slice(0, 6).map(([key, dayPairs]) => {
+      const ifsMedian = this._median(dayPairs.map(([left]) => left.dry));
+      const ecMedian = this._median(dayPairs.map(([, right]) => right.dry));
+      const differences = dayPairs.map(([left, right]) => Math.abs(left.dry - right.dry));
+      const medianDifference = this._median(differences);
+      const maxDifference = Math.max(...differences);
+      const disagreement = maxDifference >= .2 ? "deutlich uneinig" : "ähnlich";
+      return `<div class="compare"><strong>${this._escapeText(new Intl.DateTimeFormat("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", timeZone }).format(new Date(`${key}T12:00:00Z`)))}</strong><span>IFS Median ${Math.round(ifsMedian * 100)} %</span><span>EC46 Median ${Math.round(ecMedian * 100)} %</span><small>Δ Median ${Math.round(medianDifference * 100)} Pkt., max. ${Math.round(maxDifference * 100)} Pkt. · ${disagreement} · ${dayPairs.length} exakte Fenster</small></div>`;
+    }).join("");
+    return `<section class="overlap"><h3>IFS/EC46 · Tag 10–15</h3><p>Nur exakt gleiche ${hours}-h-Zeiträume. Tageszeile: Median der getrennten Modellwerte und Spannweite ihrer absoluten Abweichung.</p>${rows}</section>`;
+  }
+
+  _ec46Weeks(models, timeZone) {
+    const ec46 = models.find(model => model.key.toLowerCase().includes("ec46"));
+    if (!ec46) return "";
+    const origin = this._origin(models);
+    const groups = new Map();
+    for (const window of ec46.windows) {
+      if (window.dry == null) continue;
+      const day = Math.floor((window.start - origin) / 86400000) + 1;
+      if (day < 16 || day > 46) continue;
+      const start = 16 + Math.floor((day - 16) / 7) * 7;
+      const end = Math.min(46, start + 6);
+      const key = `${start}-${end}`;
+      if (!groups.has(key)) groups.set(key, { start, end, windows: [] });
+      groups.get(key).windows.push(window);
+    }
+    const weeks = [...groups.values()].slice(0, 5);
+    if (!weeks.length) return "";
+    const provenance = [ec46.provider, ec46.snapshot ? `Snapshot ${this._formatDate(ec46.snapshot, timeZone)}` : ""].filter(Boolean).join(" · ");
+    return `<section class="model seasonal"><div class="section-head"><div><h3>EC46 · Wochenorientierung Tag 16–46</h3><small>Keine Wochenprognose: gezeigt werden Median und Spanne der rollierenden ${this._selectedHours}-h-Trockenwahrscheinlichkeiten innerhalb der Woche${ec46.cadence ? ` · native ${ec46.cadence} h-Kadenz` : ""}.</small></div><small>${this._escapeText(provenance)}</small></div><div class="weeks">${weeks.map(week => {
+      const values = week.windows.map(window => window.dry);
+      const median = this._median(values), minimum = Math.min(...values), maximum = Math.max(...values);
+      return `<div><strong>Tag ${week.start}–${week.end}</strong><span>Median ${Math.round(median * 100)} %</span><small>Spanne ${Math.round(minimum * 100)}–${Math.round(maximum * 100)} % · ${values.length} rollierende Fenster</small></div>`;
+    }).join("")}</div></section>`;
+  }
+
+  _openMoreInfo() {
+    this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: this._config.entity }, bubbles: true, composed: true }));
+  }
+
+  _bind() {
+    this.shadowRoot.querySelectorAll?.("button[data-hours]").forEach(button => button.addEventListener("click", () => {
+      this._selectedHours = Number(button.dataset.hours);
+      this._render();
+    }));
+    this.shadowRoot.querySelector?.("button.entity")?.addEventListener("click", () => this._openMoreInfo());
+  }
+
+  _message(message) {
+    this.shadowRoot.innerHTML = `<ha-card><div class="message">${this._escapeText(message)}</div></ha-card><style>.message{padding:18px;color:var(--secondary-text-color)}</style>`;
+  }
+
+  _render() {
+    if (!this._config || !this.shadowRoot) return;
+    const state = this._hass?.states?.[this._config.entity];
+    if (!state) return this._message(`Entität ${this._config.entity} nicht gefunden.`);
+    const entityUnavailable = ["unavailable", "unknown"].includes(String(state.state));
+    const attributes = state.attributes || {};
+    const models = this._windows(this._planningModels(attributes), this._selectedHours || 24);
+    if (!models.length) return this._message(entityUnavailable
+      ? "Planungsprognose derzeit nicht verfügbar."
+      : `Keine ${this._selectedHours || 24}-Stunden-Planungsfenster verfügbar.`);
+    const timeZone = attributes.site_timezone || attributes.timezone || "UTC";
+    const stale = attributes.upstream_stale === true || attributes.forecast_planning_stale === true
+      || models.some(model => model.stale || model.windows.some(window => window.stale));
+    const partial = models.some(model => model.windows.some(window => window.coverage != null && window.coverage < .999));
+    const best = this._heroBest(models, timeZone);
+    const title = this._config.title || "Ernte- und Trockenfenster";
+    const bestText = best ? `${best.model.label}: ${this._formatWindow(best.window, timeZone)} · ${Math.round(best.window.dry * 100)} % Trockenwahrscheinlichkeit` : "Keine Trockenwahrscheinlichkeit verfügbar";
+    this.shadowRoot.innerHTML = `<ha-card><div class="content">
+      <div class="head"><div><button class="entity" type="button"><h2>${this._escapeText(title)}</h2><small>${this._escapeText(attributes.friendly_name || this._config.entity)} · Details</small></button></div><div class="switch" role="group" aria-label="Fensterlänge"><button data-hours="24" class="${this._selectedHours === 24 ? "active" : ""}" aria-pressed="${this._selectedHours === 24}">24 h</button><button data-hours="48" class="${this._selectedHours === 48 ? "active" : ""}" aria-pressed="${this._selectedHours === 48}">48 h</button></div></div>
+      <div class="summary"><strong>${this._escapeText(bestText)}</strong><span>${best ? `Bestes ${this._selectedHours}-h-Fenster der nächsten sieben verfügbaren ${this._escapeText(best.model.label)}-Starttage · ${this._dryLabel(best.window.dry)}` : ""}${entityUnavailable ? " · 24-h-Zustand nicht verfügbar" : ""}${stale ? " · Snapshot veraltet" : ""}${partial ? " · unvollständige Abdeckung markiert" : ""}</span></div>
+      <p class="legend">Trockenwahrscheinlichkeit: höher = trockener. P50 und P10–P90 sind Niederschlagsmengen.</p>
+      ${this._nearFutureSection(models, this._selectedHours, timeZone)}
+      ${this._overlap(models, this._selectedHours, timeZone)}
+      ${this._ec46Weeks(models, timeZone)}
+    </div></ha-card><style>${this._styles()}</style>`;
+    this._bind();
+  }
+
+  _styles() {
+    return `.content{padding:18px;color:var(--primary-text-color)}.head,.section-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}h2,h3,p{margin:0}h2{font-size:21px}h3{font-size:16px}.entity{padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.entity small,.section-head small,.legend,.model-line small,.summary span,.overlap p,.compare small,.weeks small{color:var(--secondary-text-color)}.entity:focus-visible,button:focus-visible{outline:2px solid var(--primary-color);outline-offset:3px}.switch{display:flex;gap:4px;padding:3px;border-radius:9px;background:var(--secondary-background-color)}.switch button{border:0;border-radius:7px;padding:6px 10px;background:transparent;color:inherit;font:inherit;cursor:pointer}.switch .active{background:var(--secondary-color,var(--primary-color));color:var(--text-primary-color)}.summary{display:grid;gap:3px;margin:14px 0 6px;padding:11px 12px;border-left:4px solid var(--primary-color);background:var(--secondary-background-color);border-radius:8px}.legend{font-size:12px;margin:8px 0 14px}.model,.overlap{display:grid;gap:10px;padding:13px 0;border-top:1px solid var(--divider-color)}.section-head{align-items:baseline}.section-head>small{max-width:48%;text-align:right;font-size:11px}.days{display:grid;grid-template-columns:repeat(7,minmax(150px,1fr));gap:8px;overflow-x:auto;padding-bottom:2px}.day{display:grid;align-content:start;gap:7px;padding:9px;border:1px solid var(--divider-color);border-radius:10px;background:var(--card-background-color)}.day>strong{font-size:13px}.model-line{display:grid;grid-template-columns:auto 1fr;gap:3px 7px;font-size:12px}.model-line strong{font-size:11px}.model-line>span{font-variant-numeric:tabular-nums;text-align:right}.model-line i{grid-column:1/-1;height:5px;border-radius:4px;background:var(--secondary-background-color);overflow:hidden}.model-line i b{display:block;height:100%;border-radius:inherit;background:var(--primary-color)}.unknown i b{background:var(--disabled-text-color)}.model-line small{grid-column:1/-1;font-size:10px;line-height:1.3}.seasonal{border-left:3px solid var(--secondary-text-color);padding-left:10px}.overlap{margin-top:2px}.overlap h3{font-size:15px}.overlap p{font-size:12px}.compare{display:grid;grid-template-columns:minmax(92px,1fr) 1fr 1fr;gap:4px 8px;font-size:12px;padding:8px;background:var(--secondary-background-color);border-radius:7px}.compare span{font-variant-numeric:tabular-nums}.compare small{grid-column:1/-1;font-size:10px}.weeks{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:8px;overflow-x:auto}.weeks>div{display:grid;gap:3px;padding:9px;border-radius:8px;background:var(--secondary-background-color)}.weeks span{font-weight:650;font-variant-numeric:tabular-nums}.weeks small{font-size:10px;line-height:1.3}@media(max-width:560px){.head{align-items:stretch;flex-direction:column}.switch{align-self:flex-start}.section-head{align-items:flex-start;flex-direction:column}.section-head>small{max-width:none;text-align:left}.compare{grid-template-columns:1fr 1fr}.compare strong{grid-column:1/-1}}`;
+  }
+}
+
 if (!customElements.get("nhz-climate-range-card")) customElements.define("nhz-climate-range-card", NhzClimateRangeCard);
 if (!customElements.get("nhz-precipitation-chart")) customElements.define("nhz-precipitation-chart", NhzPrecipitationChart);
 if (!customElements.get("nhz-climate-ventilation-card")) customElements.define("nhz-climate-ventilation-card", NhzClimateVentilationCard);
+if (!customElements.get("nhz-climate-dry-window-card")) customElements.define("nhz-climate-dry-window-card", NhzClimateDryWindowCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
   window.customCards.push({
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.13.1",
+    version: "0.14.0",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
@@ -1238,6 +1589,14 @@ if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card
     type: "nhz-climate-ventilation-card",
     name: "NHZ Climate Ventilation Card",
     description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
-    version: "0.13.1",
+    version: "0.14.0",
+  });
+}
+if (!window.customCards.some(card => card.type === "nhz-climate-dry-window-card")) {
+  window.customCards.push({
+    type: "nhz-climate-dry-window-card",
+    name: "NHZ Climate Dry Window Card",
+    description: "Getrennte IFS- und EC46-Trockenfenster für die Einsatzplanung",
+    version: "0.14.0",
   });
 }
