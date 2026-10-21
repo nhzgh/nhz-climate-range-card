@@ -21,6 +21,24 @@ const Card = registry["nhz-climate-ventilation-card"];
 const PrecipitationCard = registry["nhz-precipitation-chart"];
 const DryWindowCard = registry["nhz-climate-dry-window-card"];
 
+test("preserves horizontal planner positions on ordinary hass updates", () => {
+  const card = new DryWindowCard();
+  const previousDays = { scrollLeft: 386 };
+  const previousWeeks = { scrollLeft: 112 };
+  card.shadowRoot = { querySelector: selector => selector === ".days" ? previousDays : previousWeeks };
+  const saved = card._captureHorizontalScroll();
+  const nextDays = { scrollLeft: 0 };
+  const nextWeeks = { scrollLeft: 0 };
+  card.shadowRoot = { querySelector: selector => selector === ".days" ? nextDays : nextWeeks };
+  card._restoreHorizontalScroll(saved);
+  assert.deepEqual([nextDays.scrollLeft, nextWeeks.scrollLeft], [386, 112]);
+
+  let preserve = false;
+  card._render = value => { preserve = value; };
+  card.hass = { states: {} };
+  assert.equal(preserve, true);
+});
+
 test("keeps rolling IFS and EC46 dry windows separate and chronological", () => {
   const card = new DryWindowCard();
   const models = card._planningModels({

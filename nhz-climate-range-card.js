@@ -1242,7 +1242,9 @@ class NhzClimateDryWindowCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    // Home Assistant assigns `hass` for ordinary state updates. Preserve the
+    // horizontal planner position across that otherwise full Shadow-DOM draw.
+    this._render(true);
   }
 
   getCardSize() { return 9; }
@@ -1526,6 +1528,22 @@ class NhzClimateDryWindowCard extends HTMLElement {
     this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId: this._config.entity }, bubbles: true, composed: true }));
   }
 
+  _captureHorizontalScroll() {
+    const read = selector => {
+      const element = this.shadowRoot?.querySelector?.(selector);
+      return Number.isFinite(element?.scrollLeft) ? element.scrollLeft : 0;
+    };
+    return { days: read(".days"), weeks: read(".weeks") };
+  }
+
+  _restoreHorizontalScroll(positions) {
+    if (!positions) return;
+    for (const [selector, left] of [[".days", positions.days], [".weeks", positions.weeks]]) {
+      const element = this.shadowRoot?.querySelector?.(selector);
+      if (element && left > 0) element.scrollLeft = left;
+    }
+  }
+
   _bind() {
     this.shadowRoot.querySelectorAll?.("button[data-hours]").forEach(button => button.addEventListener("click", () => {
       this._selectedHours = Number(button.dataset.hours);
@@ -1538,8 +1556,9 @@ class NhzClimateDryWindowCard extends HTMLElement {
     this.shadowRoot.innerHTML = `<ha-card><div class="message">${this._escapeText(message)}</div></ha-card><style>.message{padding:18px;color:var(--secondary-text-color)}</style>`;
   }
 
-  _render() {
+  _render(preserveHorizontalScroll = false) {
     if (!this._config || !this.shadowRoot) return;
+    const scrollPositions = preserveHorizontalScroll ? this._captureHorizontalScroll() : null;
     const state = this._hass?.states?.[this._config.entity];
     if (!state) return this._message(`Entität ${this._config.entity} nicht gefunden.`);
     const entityUnavailable = ["unavailable", "unknown"].includes(String(state.state));
@@ -1564,6 +1583,12 @@ class NhzClimateDryWindowCard extends HTMLElement {
       ${this._ec46Weeks(models, timeZone)}
     </div></ha-card><style>${this._styles()}</style>`;
     this._bind();
+    // The immediate write avoids a visible jump. A second frame covers HA's
+    // asynchronous custom-element/layout completion without rebuilding data.
+    this._restoreHorizontalScroll(scrollPositions);
+    if (scrollPositions && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => this._restoreHorizontalScroll(scrollPositions));
+    }
   }
 
   _styles() {
@@ -1581,7 +1606,7 @@ if (!window.customCards.some(card => card.type === "nhz-climate-range-card")) {
     type: "nhz-climate-range-card",
     name: "NHZ Climate Range Card",
     description: "Gemeinsame Zeitraumwahl für NHZ-Klimavergleiche",
-    version: "0.14.0",
+    version: "0.14.1",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card")) {
@@ -1589,7 +1614,7 @@ if (!window.customCards.some(card => card.type === "nhz-climate-ventilation-card
     type: "nhz-climate-ventilation-card",
     name: "NHZ Climate Ventilation Card",
     description: "Klickbare Lüftungsbewertung je Raum mit Stabilisierung",
-    version: "0.14.0",
+    version: "0.14.1",
   });
 }
 if (!window.customCards.some(card => card.type === "nhz-climate-dry-window-card")) {
@@ -1597,6 +1622,6 @@ if (!window.customCards.some(card => card.type === "nhz-climate-dry-window-card"
     type: "nhz-climate-dry-window-card",
     name: "NHZ Climate Dry Window Card",
     description: "Getrennte IFS- und EC46-Trockenfenster für die Einsatzplanung",
-    version: "0.14.0",
+    version: "0.14.1",
   });
 }

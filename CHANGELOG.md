@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.1
+
+- Preserve the horizontal positions of the seven-day and EC46 week planners
+  across ordinary Home Assistant state updates instead of snapping back to
+  the first item on every Shadow-DOM render.
+
 ## 0.14.0
 
 - Add `custom:nhz-climate-dry-window-card` for the dedicated bounded
