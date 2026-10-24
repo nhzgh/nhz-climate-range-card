@@ -21,7 +21,7 @@ const Card = registry["nhz-climate-ventilation-card"];
 const PrecipitationCard = registry["nhz-precipitation-chart"];
 const DryWindowCard = registry["nhz-climate-dry-window-card"];
 
-test("preserves horizontal planner positions on ordinary hass updates", () => {
+test("preserves horizontal planner positions without rebuilding for unrelated hass updates", () => {
   const card = new DryWindowCard();
   const previousDays = { scrollLeft: 386 };
   const previousWeeks = { scrollLeft: 112 };
@@ -33,10 +33,16 @@ test("preserves horizontal planner positions on ordinary hass updates", () => {
   card._restoreHorizontalScroll(saved);
   assert.deepEqual([nextDays.scrollLeft, nextWeeks.scrollLeft], [386, 112]);
 
-  let preserve = false;
-  card._render = value => { preserve = value; };
-  card.hass = { states: {} };
-  assert.equal(preserve, true);
+  card._config = { entity: "sensor.example_dry_window" };
+  const renders = [];
+  card._render = value => { renders.push(value); };
+  const state = { state: "70", last_updated: "2026-10-24T12:00:00Z", attributes: { planning_models: [] } };
+  card.hass = { states: { "sensor.example_dry_window": state, "sensor.unrelated": { state: "on" } } };
+  card.hass = { states: { "sensor.example_dry_window": state, "sensor.unrelated": { state: "off" } } };
+  card.hass = { states: { "sensor.example_dry_window": { ...state, attributes: { planning_models: [{ model_key: "ifs_eps" }] } } } };
+  assert.deepEqual(renders, [true, true]);
+  const dryCardSource = source.slice(source.indexOf("class NhzClimateDryWindowCard"));
+  assert.doesNotMatch(dryCardSource, /requestAnimationFrame|scrollIntoView|\.focus\(/);
 });
 
 test("keeps rolling IFS and EC46 dry windows separate and chronological", () => {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.2
+
+- Avoid rebuilding the dry-window card for unrelated Home Assistant state
+  updates, so vertical dashboard scrolling is no longer pulled back to the
+  card while its horizontal planner position remains stable.
+- Remove the delayed scroll restoration write; genuine planner updates restore
+  only the inner horizontal overflow positions without touching page scroll or
+  focus.
+
 ## 0.14.1
 
 - Preserve the horizontal positions of the seven-day and EC46 week planners
